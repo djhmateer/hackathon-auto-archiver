@@ -1,0 +1,170 @@
+from datetime import timezone
+import json
+import re
+import mimetypes
+import requests
+
+from auto_archiver.utils.custom_logger import logger
+from pytwitter import Api
+from pytwitter.error import PyTwitterError 
+from slugify import slugify
+
+from auto_archiver.core import Extractor
+from auto_archiver.core import Metadata, Media
+from auto_archiver.utils import get_datetime_from_str
+
+
+class TwitterApiExtractor(Extractor):
+    valid_url: re.Pattern = re.compile(r"(?:twitter|x).com\/(?:\#!\/)?(\w+)\/status(?:es)?\/(\d+)")
+
+    def setup(self) -> None:
+        self.api_index = 0
+        self.apis = []
+        if len(self.bearer_tokens):
+            self.apis.extend([Api(bearer_token=bearer_token) for bearer_token in self.bearer_tokens])
+        if self.bearer_token:
+            self.apis.append(Api(bearer_token=self.bearer_token))
+        if self.consumer_key and self.consumer_secret and self.access_token and self.access_secret:
+            self.apis.append(
+                Api(
+                    consumer_key=self.consumer_key,
+                    consumer_secret=self.consumer_secret,
+                    access_token=self.access_token,
+                    access_secret=self.access_secret,
+                )
+            )
+        assert self.api_client is not None, (
+            "Missing Twitter API configurations, please provide either AND/OR (consumer_key, consumer_secret, access_token, access_secret) to use this archiver, you can provide both for better rate-limit results."
+        )
+
+    @property  # getter .mimetype
+    def api_client(self) -> str:
+        return self.apis[self.api_index]
+
+    def sanitize_url(self, url: str) -> str:
+        # expand URL if t.co and clean tracker GET params
+        if "https://t.co/" in url:
+            try:
+                r = requests.get(url, timeout=30)
+                url = r.url
+            except Exception as e:
+                logger.error(f"Failed to expand Twitter URL: {e}")
+        return url
+
+    def download(self, item: Metadata) -> Metadata:
+        # call download retry until success or no more apis
+        while self.api_index < len(self.apis):
+            if res := self.download_retry(item):
+                return res
+            self.api_index += 1
+        self.api_index = 0
+        return False
+
+    def get_username_tweet_id(self, url):
+        # detect URLs that we definitely cannot handle
+        matches = self.valid_url.findall(url)
+        if not len(matches):
+            return False, False
+
+        username, tweet_id = matches[0]  # only one URL supported
+        logger.debug(f"Found {username=} and {tweet_id=}")
+
+        return username, tweet_id
+
+    def download_retry(self, item: Metadata) -> Metadata:
+        url = item.get_url()
+        # detect URLs that we definitely cannot handle
+        username, tweet_id = self.get_username_tweet_id(url)
+        if not username:
+            return False
+
+        try:
+            tweet = self.api_client.get_tweet(
+                tweet_id,
+                expansions=["attachments.media_keys"],
+                media_fields=["type", "duration_ms", "url", "variants"],
+                tweet_fields=["attachments", "author_id", "created_at", "entities", "id", "text", "possibly_sensitive"],
+            )
+            logger.debug(tweet)
+        except PyTwitterError as e:
+            if "Too Many Requests" in str(e): 
+                logger.info(f"PyTwitter API: Too Many Requests: {e}")
+                logger.info(f"This is normal behaviour if we've called the API in the last 15 minutes as we don't pay for it anymore. Should failover to the wacz_extractor_enricher as an extractor so we get a good success result.")
+            # DM 16th Oct 26 - 402 means our X API account is out of credits, not that the tweet is missing
+            elif "credits depleted" in str(e):
+                logger.warning(f"PyTwitter API: X API credits depleted (402) - top up the X developer account. {url=}")
+                logger.warning("If fxtwitter also returned 404 the tweet has most likely been deleted (x.com shows \"Hmm...this page doesn't exist\")")
+            else:
+                logger.error(f"PyTwitter API: Could not get tweet: {e}")
+                logger.error("Has the tweet been deleted? x.com shows \"Hmm...this page doesn't exist. Try searching for something else.\"")
+            return False
+        except Exception as e:
+            logger.error(f"Could not get tweet: {e}")
+            return False
+
+        result = Metadata()
+        result.set_title(tweet.data.text)
+        result.set_timestamp(
+            get_datetime_from_str(tweet.data.created_at, "%Y-%m-%dT%H:%M:%S.%fZ").replace(tzinfo=timezone.utc)
+        )
+
+        urls = []
+        if tweet.includes:
+            for i, m in enumerate(tweet.includes.media):
+                media = Media(filename="")
+                if m.url and len(m.url):
+                    media.set("src", m.url)
+                    media.set("duration", (m.duration_ms or 1) // 1000)
+                    mimetype = "image/jpeg"
+                elif hasattr(m, "variants"):
+                    variant = self.choose_variant(m.variants)
+                    if not variant:
+                        continue
+                    media.set("src", variant.url)
+                    mimetype = variant.content_type
+                else:
+                    continue
+                logger.info(f"Found media {media}")
+                ext = mimetypes.guess_extension(mimetype)
+                media.filename = self.download_from_url(media.get("src"), f"{slugify(url)}_{i}{ext}")
+                if not media.filename:
+                    logger.warning(f"Failed to download media from {media.get('src')}")
+                    continue
+                result.add_media(media)
+
+        result.set_content(
+            json.dumps(
+                {
+                    "id": tweet.data.id,
+                    "text": tweet.data.text,
+                    "created_at": tweet.data.created_at,
+                    "author_id": tweet.data.author_id,
+                    "geo": tweet.data.geo,
+                    "lang": tweet.data.lang,
+                    "media": urls,
+                },
+                ensure_ascii=False,
+                indent=4,
+            )
+        )
+
+        # result.set("raw_data", tweet.data)
+        # Convert the entire tweet.data object to a dictionary and serialize it
+        tweet_data_dict = vars(tweet.data)  # or tweet.data.__dict__
+        result.set("raw_data", json.dumps(tweet_data_dict, ensure_ascii=False, indent=4, default=str))
+
+        return result.success("twitter-api")
+
+    def choose_variant(self, variants):
+        """
+        Chooses the highest quality variable possible out of a list of variants
+        """
+        variant, bit_rate = None, -1
+        for var in variants:
+            if var.content_type == "video/mp4":
+                if var.bit_rate > bit_rate:
+                    bit_rate = var.bit_rate
+                    variant = var
+            else:
+                variant = var if not variant else variant
+        return variant

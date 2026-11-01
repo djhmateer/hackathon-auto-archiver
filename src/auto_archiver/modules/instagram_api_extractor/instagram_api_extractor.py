@@ -1,0 +1,512 @@
+"""
+The `instagram_api_extractor` module provides tools for archiving various types of Instagram content
+using the [Instagrapi API](https://github.com/subzeroid/instagrapi).
+
+Connects to an Instagrapi API deployment and allows for downloading Instagram user profiles,
+posts, stories, highlights, and tagged content. It offers advanced configuration options for filtering
+data, reducing JSON output size, and handling large profiles.
+
+"""
+
+import base64
+import binascii
+import math
+import random
+import re
+from datetime import datetime, timezone
+import traceback
+
+import requests
+from auto_archiver.utils.custom_logger import logger
+from retrying import retry
+from tqdm import tqdm
+
+from auto_archiver.core import Extractor
+from auto_archiver.core import Media
+from auto_archiver.core import Metadata
+
+
+class InstagramAPIExtractor(Extractor):
+    """
+    Uses an https://github.com/subzeroid/instagrapi API deployment to fetch instagram posts data
+
+    # TODO: improvement collect aggregates of locations[0].location and mentions for all posts
+    """
+
+    # DM 28th Sep 26 - the / after the stories|p|reel prefix is now required - previously it was optional, so profile
+    # usernames starting with p/reel/stories were misparsed as posts eg /paltimesnews -> post code 'altimesnews'
+    # DM 28th Oct 26 - anchored to the start of the url, as it matched instagram.com anywhere in it, eg a
+    # web.archive.org copy of a cdninstagram.com/o1/... video was looked up as the profile 'o1' (HikerAPI 404)
+    valid_url = re.compile(
+        r"^(?:https?:\/\/)?(?:[\w-]+\.)?instagram\.com\/(?:(stories(?:\/highlights)?|p|reel)\/)?([^\/\?]*)\/?(\d+)?"
+    )
+
+    _skipped_items = 0  # per download(), see there
+
+    def setup(self) -> None:
+        if self.api_endpoint[-1] == "/":
+            self.api_endpoint = self.api_endpoint[:-1]
+        self.full_profile_max_posts = int(self.full_profile_max_posts or 0)
+        if self.full_profile_max_posts == 0:
+            self.full_profile_max_posts = math.inf
+
+    def sanitize_url(self, url: str) -> str:
+        # DM 28th Sep 26 - we don't support instagram /reels/ links, ask the user to use /p/ instead
+        # raised here as sanitize_url runs before the extractors outside their try/except, so the
+        # AssertionError reaches the orchestrator which writes the message to the spreadsheet status column
+        if reels_match := re.search(r"instagram\.com/reels/([^/?#]+)", url):
+            raise AssertionError(
+                f"- Instagram /reels/ links are not supported, please use /p/ instead eg https://www.instagram.com/p/{reels_match.group(1)}/"
+            )
+        return url
+
+    def download(self, item: Metadata) -> Metadata:
+        # DM 8th Oct 26 - posts/carousel items that fail are skipped so the rest is archived, but the row still
+        # says success, so count them and show it in the status column
+        self._skipped_items = 0
+        result = self._download(item)
+        if result and self._skipped_items:
+            logger.warning(f"{self._skipped_items} Instagram item(s) failed to download for {item.get_url()}")
+            result.add_status_note(f"{self._skipped_items} Instagram item(s) failed to download - see logs")
+        return result
+
+    def _download(self, item: Metadata) -> Metadata:
+        url = item.get_url()
+        url = url.replace("instagr.com", "instagram.com").replace("instagr.am", "instagram.com")
+
+        # DM 17th Oct 26 - /<username>/reel/<code>/ and /<username>/p/<code>/ links were misparsed by valid_url as
+        # the profile <username>, so the whole profile was archived instead of the post. Drop the username.
+        #   eg https://www.instagram.com/andry_boxer_volunteer/reel/DehV8tuOOAv/
+        #   -> https://www.instagram.com/reel/DehV8tuOOAv/
+        # look for instagram.com/<first part>/<p or reel>/
+        username_post_match = re.search(r"instagram\.com/([^/?#]+)/(p|reel)/", url)
+        if username_post_match:
+            first_part = username_post_match.group(1)  # eg andry_boxer_volunteer
+            post_type = username_post_match.group(2)  # p or reel
+            # /stories/... and /s/... links have their own handling, so only strip real usernames
+            if first_part not in ("stories", "s"):
+                url = url.replace(f"instagram.com/{first_part}/{post_type}/", f"instagram.com/{post_type}/", 1)
+
+        # DM 12th Oct 26 - /s/<base64 of "highlight:<id>">?story_media_id=<id> is a highlight share link, it was
+        # misparsed by valid_url as the profile 's' so every one failed with a 400 from v2/user/by/username
+        if share_match := re.search(r"instagram\.com/s/([^/?#]+)", url):
+            if story_media_match := re.search(r"[?&]story_media_id=(\d+)", url):
+                return self.download_post(item, id=story_media_match.group(1), context="story")
+            share_id = share_match.group(1)
+            try:
+                decoded = base64.urlsafe_b64decode(share_id + "=" * (-len(share_id) % 4)).decode()
+            except (binascii.Error, UnicodeDecodeError):
+                decoded = ""
+            if decoded.startswith("highlight:"):
+                return self.download_highlights(item, decoded.removeprefix("highlight:"))
+            logger.warning(f"Unknown instagram share link {share_id=} {decoded=}")
+            return
+
+        insta_matches = self.valid_url.findall(url)
+
+        if not len(insta_matches) or len(insta_matches[0]) != 3:
+            return
+        if len(insta_matches) > 1:
+            logger.debug("Multiple instagram matches found, using the first one")
+            return
+        g1, g2, g3 = insta_matches[0][0], insta_matches[0][1], insta_matches[0][2]
+        if g1 == "":
+            return self.download_profile(item, g2)
+        elif g1 == "p":
+            return self.download_post(item, g2, context="post")
+        elif g1 == "reel":
+            return self.download_post(item, g2, context="reel")
+        elif g1 == "stories/highlights":
+            return self.download_highlights(item, g2)
+        elif g1 == "stories":
+            if len(g3):
+                return self.download_post(item, id=g3, context="story")
+            return self.download_stories(item, g2)
+        else:
+            logger.warning(f"Unknown instagram regex group match {g1=}")
+            return
+
+    # hikerapi's Cloudflare edge occasionally returns a 502/503 during origin overload and its error
+    # body explicitly asks callers to back off at least 60s before retrying
+    #  8s → 16s → 32s → 60s → 60s
+    # DM 30th Oct 26 - a 404 didn't recover on retry and cost about 3 minutes each time
+    @retry(
+        retry_on_exception=lambda e: not (isinstance(e, requests.HTTPError) and e.response.status_code == 404),
+        wait_exponential_multiplier=8000,
+        wait_exponential_max=60000,
+        stop_max_attempt_number=5,
+    )
+    def call_api(self, path: str, params: dict) -> dict:
+        headers = {"accept": "application/json", "x-access-key": self.access_token}
+        logger.debug(f"Calling {self.api_endpoint}/{path} with {params=}")
+        response = requests.get(f"{self.api_endpoint}/{path}", headers=headers, params=params, timeout=60)
+        response.raise_for_status()
+        return response.json()
+
+    def cleanup_dict(self, d: dict | list) -> dict:
+        # repeats 3 times to remove nested empty values
+        if not self.minimize_json_output:
+            return d
+        if isinstance(d, list):
+            return [self.cleanup_dict(v) for v in d]
+        if not isinstance(d, dict):
+            return d
+        return {
+            k: clean_v
+            for k, v in d.items()
+            if (clean_v := self.cleanup_dict(v)) not in [0.0, 0, [], {}, "", None, "null"]
+            and k not in ["x", "y", "width", "height"]
+        }
+
+    def download_profile(self, result: Metadata, username: str) -> Metadata:
+        # download basic profile info
+        url = result.get_url()
+        user = self.call_api("v2/user/by/username", {"username": username}).get("user")
+        assert user, f"User {username} not found"
+        user = self.cleanup_dict(user)
+
+        result.set_title(user.get("full_name", username)).set("data", user)
+        if pic_url := user.get("profile_pic_url_hd", user.get("profile_pic_url")):
+            filename = self.download_from_url(pic_url)
+            if filename:
+                result.add_media(Media(filename=filename), id="profile_picture")
+            else:
+                logger.warning(f"Failed to download profile picture from {pic_url}")
+
+        count_posts = 0
+        if self.full_profile:
+            user_id = user.get("pk")
+            # download all stories
+            try:
+                stories = self._download_stories_reusable(
+                    result, username, max_to_download=self.full_profile_max_posts - count_posts
+                )
+                count_posts += len(stories)
+                result.set("#stories", len(stories))
+            except Exception as e:
+                result.append("errors", f"Error downloading stories for {username}")
+                logger.error(f"Error downloading stories for {username}: {e} {traceback.format_exc()}")
+
+            # download all posts
+            try:
+                if count_posts < self.full_profile_max_posts:
+                    count_posts += self.download_all_posts(
+                        result, user_id, max_to_download=self.full_profile_max_posts - count_posts
+                    )
+            except Exception as e:
+                result.append("errors", f"Error downloading posts for {username}")
+                # otherwise the row reads as a plain success with the profile's own posts missing
+                result.add_status_note("own posts failed - see logs")
+                logger.error(f"Error downloading posts for {username}: {e} {traceback.format_exc()}")
+
+            # download all tagged
+            try:
+                if count_posts < self.full_profile_max_posts:
+                    count_posts += self.download_all_tagged(
+                        result, user_id, max_to_download=self.full_profile_max_posts - count_posts
+                    )
+            except Exception as e:
+                result.append("errors", f"Error downloading tagged posts for {username}")
+                logger.error(f"Error downloading tagged posts for {username}: {e} {traceback.format_exc()}")
+
+            # download all highlights
+            try:
+                if count_posts < self.full_profile_max_posts:
+                    count_posts += self.download_all_highlights(
+                        result, username, user_id, max_to_download=self.full_profile_max_posts - count_posts
+                    )
+            except Exception as e:
+                result.append("errors", f"Error downloading highlights for {username}")
+                logger.error(f"Error downloading highlights for {username}: {e} {traceback.format_exc()}")
+
+        result.set_url(url)  # reset as scrape_item modifies it
+        return result.success("insta profile")
+
+    def download_all_highlights(self, result, username, user_id, max_to_download: int) -> int:
+        count_highlights = 0
+        highlights = self.call_api("v1/user/highlights", {"user_id": user_id})
+        highlights = highlights[: min(max_to_download, len(highlights))]  # newest to oldest
+        for h in highlights:
+            try:
+                h_info = self._download_highlights_reusable(result, h.get("pk"), max_to_download=max_to_download)
+                count_highlights += len(h_info.get("items", []))
+            except Exception as e:
+                result.append(
+                    "errors",
+                    f"Error downloading highlight id{h.get('pk')} for {username}",
+                )
+                logger.error(
+                    f"Error downloading highlight id{h.get('pk')} for {username}: {e} {traceback.format_exc()}"
+                )
+            if count_highlights >= max_to_download:
+                logger.debug(f"HIGHLIGHTS reached max_to_download={self.full_profile_max_posts}")
+                break
+        result.set("#highlights", count_highlights)
+        return count_highlights
+
+    def download_post(self, result: Metadata, code: str = None, id: str = None, context: str = "") -> Metadata:
+        if id:
+            post = self.call_api("v1/media/by/id", {"id": id})
+        else:
+            post = self.call_api("v1/media/by/code", {"code": code})
+        assert post, f"Post {id or code} not found"
+
+        result.set(f"{context}_data", post)
+		# add the entire data from the API call to the metadata for future automated parsing via metadata.json
+        result.set("raw_data", post)
+
+        if caption_text := post.get("caption_text"):
+            result.set_title(caption_text)
+
+        post = self.scrape_item(result, post, context)
+
+        if post.get("taken_at"):
+            result.set_timestamp(post.get("taken_at"))
+        return result.success(f"insta {context or 'post'}")
+
+    def download_highlights(self, result: Metadata, id: str) -> Metadata:
+        h_info = self._download_highlights_reusable(result, id, self.full_profile_max_posts)
+        items = len(h_info.get("items", []))
+        del h_info["items"]
+        result.set_title(h_info.get("title")).set("data", h_info).set("#reels", items)
+        return result.success("insta highlights")
+
+    def _download_highlights_reusable(self, result: Metadata, id: str, max_to_download: int) -> dict:
+        full_h = self.call_api("v2/highlight/by/id", {"id": id})
+        h_info = full_h.get("response", {}).get("reels", {}).get(f"highlight:{id}")
+        assert h_info, f"Highlight {id} not found: {full_h=}"
+
+        if cover_media := h_info.get("cover_media", {}).get("cropped_image_version", {}).get("url"):
+            filename = self.download_from_url(cover_media)
+            if filename:
+                result.add_media(Media(filename=filename), id=f"cover_media highlight {id}")
+            else:
+                logger.warning(f"Failed to download cover media from {cover_media}")
+
+        items = h_info.get("items", [])[::-1]  # newest to oldest
+        items = items[: min(max_to_download, len(items))]
+        for h in tqdm(items, desc="downloading highlights", unit="highlight"):
+            try:
+                self.scrape_item(result, h, "highlight")
+            except Exception as e:
+                result.append("errors", f"Error downloading highlight {h.get('id')}")
+                self._skipped_items += 1
+                logger.error(f"Error downloading highlight, skipping {h.get('id')}: {e} {traceback.format_exc()}")
+
+        return h_info
+
+    def download_stories(self, result: Metadata, username: str) -> Metadata:
+        now = datetime.now().strftime("%Y-%m-%d_%H-%M")
+        stories = self._download_stories_reusable(result, username, max_to_download=self.full_profile_max_posts)
+        if stories == []:
+            return result.success("insta no story")
+        result.set_title(f"stories {username} at {now}").set("#stories", len(stories))
+        return result.success(f"insta stories {now}")
+
+    def _download_stories_reusable(self, result: Metadata, username: str, max_to_download: int) -> list[dict]:
+        stories = self.call_api("v1/user/stories/by/username", {"username": username})
+        if not stories or not len(stories):
+            return []
+        stories = stories[::-1][: min(max_to_download, len(stories))]  # newest to oldest
+
+        for s in tqdm(stories, desc="downloading stories", unit="story"):
+            try:
+                self.scrape_item(result, s, "story")
+            except Exception as e:
+                result.append("errors", f"Error downloading story {s.get('id')}")
+                self._skipped_items += 1
+                logger.error(f"Error downloading story, skipping {s.get('id')}: {e} {traceback.format_exc()}")
+        return stories
+
+    def download_all_posts(self, result: Metadata, user_id: str, max_to_download: int) -> int:
+        next_page_id = None
+        pbar = tqdm(desc="downloading posts")
+
+        post_count = 0
+        while True:
+            # DM 30th Oct 26 - v1/user/medias/chunk is deprecated and has returned 404 for every profile since 16th Oct
+            # requests leaves out next_page_id when it is None
+            resp = self.call_api("g2/user/medias", {"user_id": user_id, "flat": "true", "next_page_id": next_page_id})
+            posts = resp.get("response", {}).get("items", [])
+            if not posts:
+                break
+            next_page_id = resp.get("next_page_id")
+            posts = posts[: min(max_to_download, len(posts))]
+            logger.info(f"Parsing {len(posts)} posts, next {next_page_id=} {post_count=} {max_to_download=}")
+            for p in posts:
+                try:
+                    self.scrape_item(result, p, "post")
+                except Exception as e:
+                    result.append("errors", f"Error downloading post {p.get('id')}")
+                    self._skipped_items += 1
+                    logger.error(f"Error downloading post, skipping {p.get('id')}: {e} {traceback.format_exc()}")
+                pbar.update(1)
+                post_count += 1
+            if post_count >= max_to_download:
+                logger.info(f"POSTS reached max_to_download={self.full_profile_max_posts}")
+                break
+            if not next_page_id:
+                break
+        result.set("#posts", post_count)
+        return post_count
+
+    def download_all_tagged(self, result: Metadata, user_id: str, max_to_download: int) -> int:
+        next_page_id = ""
+        pbar = tqdm(desc="downloading tagged posts")
+
+        tagged_count = 0
+        while next_page_id is not None:
+            resp = self.call_api("v2/user/tag/medias", {"user_id": user_id, "page_id": next_page_id})
+            posts = resp.get("response", {}).get("items", [])
+            if not len(posts):
+                break
+            next_page_id = resp.get("next_page_id")
+
+            logger.info(f"Parsing {len(posts)} tagged posts, next {next_page_id=}")
+            posts = posts[: min(max_to_download, len(posts))]
+            for p in posts:
+                try:
+                    self.scrape_item(result, p, "tagged")
+                except Exception as e:
+                    result.append("errors", f"Error downloading tagged post {p.get('id')}")
+                    self._skipped_items += 1
+                    logger.error(f"Error downloading tagged post, skipping {p.get('id')}: {e} {traceback.format_exc()}")
+                pbar.update(1)
+                tagged_count += 1
+            if tagged_count >= max_to_download:
+                logger.info(f"TAGS reached max_to_download={self.full_profile_max_posts}")
+                break
+        result.set("#tagged", tagged_count)
+        return tagged_count
+
+    # reusable parsing utils below
+
+    def scrape_item(self, result: Metadata, item: dict, context: str = None) -> dict:
+        """
+        receives a Metadata and an API dict response
+        fetches the media and adds it to the Metadata
+        cleans and returns the API dict
+        context can be used to give specific id prefixes to media
+        """
+        if "clips_metadata" in item:
+            # g2/user/medias items have these keys set to null, so .get(key, default) returns None
+            if reusable_text := (item.get("clips_metadata") or {}).get("reusable_text_attribute_string"):
+                item["clips_metadata_text"] = reusable_text
+            if self.minimize_json_output:
+                del item["clips_metadata"]
+
+        if code := item.get("code") and not result.get("url"):
+            result.set_url(f"https://www.instagram.com/p/{code}/")
+
+        resources = item.get("resources") or item.get("carousel_media") or []
+        item, media, media_id = self.scrape_media(item, context)
+        # if resources are present take the main media from the first resource
+        if not media and len(resources):
+            _, media, media_id = self.scrape_media(resources[0], context)
+            resources = resources[1:]
+
+        assert media, f"Image/video not found in {item=}"
+
+        # posts with multiple items contain a resources list
+        resources_metadata = Metadata()
+        for r in resources:
+            # one carousel item failing (eg a 429 on its video) shouldn't drop the whole post
+            try:
+                self.scrape_item(resources_metadata, r)
+            except Exception as e:
+                result.append("errors", f"Error downloading carousel item {r.get('id')}")
+                self._skipped_items += 1
+                logger.error(f"Error downloading carousel item, skipping {r.get('id')}: {e}")
+        if not resources_metadata.is_empty():
+            media.set("other media", resources_metadata.media)
+
+        # DM 10th Jul 25 - Have seen duplicates returned which causes an error with the aa as can't have 
+        # multiple media with the same id. Get's deduplicated later by aa, but with this, no error.
+        id_with_random_suffix = f"{media_id}_{random.randint(1, 1000000)}"
+        
+        # result.add_media(media, id=media_id)
+        result.add_media(media, id=id_with_random_suffix)
+        return item
+
+    def scrape_media(self, item: dict, context: str) -> tuple[dict, Media, str]:
+        # story/highlight items don't have flat thumbnail_url/video_url fields, instead
+        # image_versions2.candidates and video_versions lists - extract before minimize_json_output strips them
+        image_url = item.get("thumbnail_url")
+        if not image_url:
+            candidates = (item.get("image_versions2") or {}).get("candidates", [])
+            if candidates:
+                image_url = candidates[0].get("url")
+
+        video_url = item.get("video_url")
+        if not video_url:
+            video_versions = item.get("video_versions", [])
+            if video_versions:
+                video_url = max(video_versions, key=lambda v: v.get("bandwidth", 0)).get("url")
+
+        # DM add the thumbnail and video urls to the item dict so they are not lost when minimize_json_output is applied
+        # for insta stories, highlights, and posts with multiple items, the thumbnail_url and video_url are not present in the top-level item dict
+        # eg https://www.instagram.com/stories/highlights/18013895359952045/
+        if image_url:
+            item["thumbnail_url"] = image_url
+        if video_url:
+            item["video_url"] = video_url
+
+        # remove unnecessary info
+        if self.minimize_json_output:
+            for k in [
+                "image_versions",
+                "video_versions",
+                "video_dash_manifest",
+                "image_versions2",
+                "video_versions2",
+            ]:
+                if k in item:
+                    del item[k]
+        item = self.cleanup_dict(item)
+
+        image_media = None
+        if image_url := item.get("thumbnail_url"):
+            filename = self.download_from_url(image_url, verbose=False)
+            if filename:
+                image_media = Media(filename=filename)
+            else:
+                logger.warning(f"Failed to download thumbnail from {image_url}")
+
+        # retrieve video info
+        best_id = item.get("id", item.get("pk"))
+        # g2/user/medias items have 1ltaken_at and a caption dict instead
+        taken_at = item.get("taken_at", item.get("taken_at_ts", item.get("1ltaken_at")))
+        # 1ltaken_at is a unix timestamp - same format as the dates on stories
+        if isinstance(taken_at, int):
+            taken_at = datetime.fromtimestamp(taken_at, tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        code = item.get("code")
+        caption_text = item.get("caption_text") or (item.get("caption") or {}).get("text")
+        if "carousel_media" in item:
+            del item["carousel_media"]
+
+        if video_url := item.get("video_url"):
+            filename = self.download_from_url(video_url, verbose=False)
+            if filename:
+                video_media = Media(filename=filename)
+                if taken_at:
+                    video_media.set("date", taken_at)
+                if code:
+                    video_media.set("url", f"https://www.instagram.com/p/{code}")
+                if caption_text:
+                    video_media.set("text", caption_text)
+                video_media.set("preview", [image_media])
+                video_media.set("data", [item])
+                return item, video_media, f"{context or 'video'} {best_id}"
+            else:
+                logger.warning(f"Failed to download video from {video_url}")
+        elif image_media:
+            if taken_at:
+                image_media.set("date", taken_at)
+            if code:
+                image_media.set("url", f"https://www.instagram.com/p/{code}")
+            if caption_text:
+                image_media.set("text", caption_text)
+            image_media.set("data", [item])
+            return item, image_media, f"{context or 'image'} {best_id}"
+
+        return item, None, None

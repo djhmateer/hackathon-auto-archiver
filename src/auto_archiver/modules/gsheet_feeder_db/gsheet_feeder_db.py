@@ -1,0 +1,308 @@
+"""
+GsheetsFeeder: A Google Sheets-based feeder for the Auto Archiver.
+
+This reads data from Google Sheets and filters rows based on user-defined rules.
+The filtered rows are processed into `Metadata` objects.
+
+### Key properties
+- validates the sheet's structure and filters rows based on input configurations.
+- Ensures only rows with valid URLs and unprocessed statuses are included.
+"""
+
+from datetime import datetime, timezone
+import os
+import re
+import traceback
+from typing import Tuple, Union, Iterator
+from urllib.parse import quote, urlparse
+
+import gspread
+from auto_archiver.utils.custom_logger import logger
+from slugify import slugify
+from retrying import retry
+
+from auto_archiver.core import Feeder, Database, Media
+from auto_archiver.core import Metadata
+from auto_archiver.modules.gsheet_feeder_db import GWorksheet
+from auto_archiver.utils.misc import get_current_timestamp
+
+
+# sheet "screenshot" column source, in order of preference: facebook_story_extractor, screenshot_enricher,
+# antibot_extractor_enricher, then the crawler's (DM 22nd Oct 26 - eg when the screenshot enricher's was a block page)
+SCREENSHOT_MEDIA_IDS = ("screenshot", "webdriverscreenshot", "antibot_screenshot", "browsertrix-screenshot-0")
+
+
+class GsheetsFeederDB(Feeder, Database):
+    def setup(self) -> None:
+        self.gsheets_client = gspread.service_account(filename=self.service_account)
+        # TODO mv to validators
+        if not self.sheet and not self.sheet_id:
+            raise ValueError("You need to define either a 'sheet' name or a 'sheet_id' in your manifest.")
+
+    @retry(
+        wait_exponential_multiplier=1,
+        stop_max_attempt_number=6,
+    )
+    def open_sheet(self) -> gspread.Spreadsheet:
+        if self.sheet:
+            return self.gsheets_client.open(self.sheet)
+        else:
+            return self.gsheets_client.open_by_key(self.sheet_id)
+
+    @retry(
+        wait_exponential_multiplier=1,
+        stop_max_attempt_number=6,
+    )
+    def enumerate_sheets(self, sheet) -> Iterator[gspread.Worksheet]:
+        for worksheet in sheet.worksheets():
+            yield worksheet
+
+    def __iter__(self) -> Iterator[Metadata]:
+        spreadsheet = self.open_sheet()
+        for worksheet in self.enumerate_sheets(spreadsheet):
+            with logger.contextualize(worksheet=f"{spreadsheet.title}:{worksheet.title}"):
+                if not self.should_process_sheet(worksheet.title):
+                    logger.debug(f"Skipped worksheet '{worksheet.title}' due to allow/block rules")
+                    continue
+                logger.debug(f"Opening worksheet '{worksheet.title}' header={self.header}")
+                gw = GWorksheet(worksheet, header_row=self.header, columns=self.columns)
+                if len(missing_cols := self.missing_required_columns(gw)):
+                    # a tab with none of the required columns is just a helper sheet, but a tab with only some of
+                    # them probably has a renamed/deleted header, so make that visible
+                    message = f"Skipped worksheet '{worksheet.title}' due to missing required column(s) for {missing_cols}"
+                    if len(missing_cols) < 2:
+                        logger.warning(message)
+                    else:
+                        logger.debug(message)
+                    continue
+
+                # process and yield metadata here:
+                yield from self._process_rows(gw)
+            logger.info(f"Finished worksheet {worksheet.title}")
+
+    def _process_rows(self, gw: GWorksheet):
+        for row in range(1 + self.header, gw.count_rows() + 1):
+            url = gw.get_cell(row, "url").strip()
+            if not len(url):
+                continue
+            original_status = gw.get_cell(row, "status")
+            status = gw.get_cell(row, "status", fresh=original_status in ["", None])
+            # DM 27th Oct 26 - only one run per server and this run hasn't started this row, so it was left by a
+            # run killed mid-row (eg the forced daily reboot). Assumes each worksheet is only archived by one server.
+            if status == "Archive in progress":
+                logger.warning(
+                    f"Row {row} was left 'Archive in progress' by a killed run, "
+                    f"setting status to 'Problem in archive - run again': {url}"
+                )
+                gw.set_cell(row, "status", "Problem in archive - run again")
+                continue
+            # TODO: custom status parser(?) aka should_retry_from_status
+            if status not in ["", None]:
+                continue
+
+            # DM 29th Oct 26 - a cell like "N/A" became https://N/A and went through every extractor
+            # strip any stray leading punctuation (eg ": https://...") and scheme as the orchestrator does, then
+            # a real hostname has a dot
+            bare = re.sub(r"^\W*(https?://)?", "", url)
+            hostname = urlparse(f"https://{bare}").hostname or ""
+            if "." not in hostname:
+                logger.warning(f"Row {row} is not a valid URL - skipping: {url}")
+                gw.set_cell(row, "status", "WARNING: not a valid URL")
+                continue
+
+            # Set in orchestration.yaml. Default is False
+            if self.must_have_folder_name_for_archive_to_run:
+                if not gw.get_cell(row, "folder"):
+                    logger.warning(f"Folder name not set {self.sheet}:{gw.wks.title}, row {row} - skipping and continuing with run")
+                    gw.set_cell(row, "status", "WARNING:Folder Name not set")
+                    continue
+
+            # All checks done - archival process starts here
+            m = Metadata().set_url(url)
+            self._set_context(m, gw, row)
+
+            with logger.contextualize(row=row):
+                yield m
+
+    def _set_context(self, m: Metadata, gw: GWorksheet, row: int) -> Metadata:
+        # TODO: Check folder value not being recognised
+        m.set_context("gsheet", {"row": row, "worksheet": gw})
+
+        if gw.get_cell_or_default(row, "folder", "") is None:
+            folder = ""
+        else:
+            folder = slugify(gw.get_cell_or_default(row, "folder", "").strip())
+        if len(folder):
+            if self.use_sheet_names_in_stored_paths:
+                m.set_context("folder", os.path.join(folder, slugify(self.sheet), slugify(gw.wks.title)))
+            else:
+                m.set_context("folder", folder)
+
+    def should_process_sheet(self, sheet_name: str) -> bool:
+        if len(self.allow_worksheets) and sheet_name not in self.allow_worksheets:
+            # ALLOW rules exist AND sheet name not explicitly allowed
+            return False
+        return not (self.block_worksheets and sheet_name in self.block_worksheets)
+
+    def missing_required_columns(self, gw: GWorksheet) -> list:
+        missing = []
+        for required_col in ["url", "status"]:
+            if not gw.col_exists(required_col):
+                missing.append(required_col)
+        return missing
+
+    def started(self, item: Metadata) -> None:
+        logger.info("STARTED")
+        gw, row = self._retrieve_gsheet(item)
+
+        # DM 22nd Oct 26 - a transient Sheets error (eg APIError [409] The operation was aborted) here
+        # failed the whole row before archiving even started
+        @retry(
+            wait_exponential_multiplier=1,
+            stop_max_attempt_number=5,
+        )
+        def set_status_with_retry():
+            gw.set_cell(row, "status", "Archive in progress")
+
+        set_status_with_retry()
+        logger.info(f" row: {row} on {gw.wks.spreadsheet.title} : {gw.wks.title}")
+
+    def failed(self, item: Metadata, reason: str) -> None:
+        logger.error("FAILED")
+        self._safe_status_update(item, f"Archive failed {reason}")
+        self._safe_archive_date_update(item) 
+
+    def aborted(self, item: Metadata) -> None:
+        logger.warning("ABORTED")
+        self._safe_status_update(item, "")
+
+    def fetch(self, item: Metadata) -> Union[Metadata, bool]:
+        """check if the given item has been archived already"""
+        return False
+
+    # DM 10th Jun 25 - This is the 4.DB step done step ie updating the spreadsheet with the archival results
+    def done(self, item: Metadata, cached: bool = False) -> None:
+        """archival result ready - should be saved to DB"""
+        logger.success(f"DONE {item.get_url()}")
+        gw, row = self._retrieve_gsheet(item)
+
+        # DM - success log message showing the row, sheet and tab
+        spreadsheet = gw.wks.spreadsheet.title
+        worksheet = gw.wks.title
+        logger.success(f" row {row} on {spreadsheet} : {worksheet}")
+
+        cell_updates = []
+        row_values = gw.get_row(row)
+
+        logger.info("DONE")
+
+        def batch_if_valid(col, val, final_value=None):
+            final_value = final_value or val
+            try:
+                # if val and gw.col_exists(col) and gw.get_cell(row_values, col) == "":
+                
+                if val and gw.col_exists(col):
+                    # bug - thumbnail column will always come back as no value
+                    # it is a formula eg =IMAGE("https://autoarchiverfeatures.fra1.cdn.digitaloceanspaces.com/aaf001/eb6625005b563ece063e8bd2.webp")
+                    existing_value = gw.get_cell(row_values, col)
+                    if existing_value:
+                        if self.allow_overwrite_of_spreadsheet_cells:
+                            logger.info(f"Overwriting spreadsheet cell {col}={existing_value} with {final_value}")
+                        else:
+                            # logger.warning(f"NOT overwriting spreadsheet cell {col}={existing_value} with {final_value}")
+                            return
+                    # else:
+                        # logger.info(f"No existing value for {col}")
+                    
+                    cell_updates.append((row, col, final_value))
+            except Exception as e:
+                logger.error(f"Unable to batch {col}={final_value} due to {e}")
+
+        status_message = item.status
+        if cached:
+            status_message = f"[cached] {status_message}"
+        # otherwise a row with a file that couldn't be stored looks fully archived
+        if failures := item.get_store_failures():
+            logger.warning(f"{len(failures)} file(s) couldn't be stored for row {row}: {', '.join(failures)}")
+            status_message += f" ({len(failures)} upload{'s' if len(failures) > 1 else ''} failed - see logs)"
+        for note in item.get_status_notes():
+            status_message += f" ({note})"
+        cell_updates.append((row, "status", status_message))
+
+        media: Media = item.get_final_media()
+        if hasattr(media, "urls"):
+            batch_if_valid("archive", "\n".join(media.urls))
+        batch_if_valid("date", True, get_current_timestamp())
+        batch_if_valid("title", item.get_title())
+        batch_if_valid("text", item.get("content", ""))
+        batch_if_valid("timestamp", item.get_timestamp())
+        if media:
+            batch_if_valid("hash", media.get("hash", "not-calculated"))
+
+        # merge all pdq hashes into a single string, if present
+        pdq_hashes = []
+        all_media = item.get_all_media()
+        for m in all_media:
+            if pdq := m.get("pdq_hash"):
+                pdq_hashes.append(pdq)
+        if len(pdq_hashes):
+            batch_if_valid("pdq_hash", ",".join(pdq_hashes))
+
+        # DM 2nd Oct 26 - each module uses its own screenshot id (add_media rejects duplicate ids), so take the first
+        # present. Only "screenshot" was checked since the Jun 25 rename, leaving the column empty bar fb stories
+        for screenshot_id in SCREENSHOT_MEDIA_IDS:
+            if (screenshot := item.get_media_by_id(screenshot_id)) and getattr(screenshot, "urls", None):
+                batch_if_valid("screenshot", "\n".join(screenshot.urls))
+                break
+
+        # DM 2nd Oct 26 - a media whose upload failed has urls == [], which made urls[0] raise and lose the whole row
+        # update (7x in prod, 6-15 Sep 26)
+        if (thumbnail := item.get_first_image("thumbnail")) and getattr(thumbnail, "urls", None):
+            batch_if_valid("thumbnail", f'=IMAGE("{thumbnail.urls[0]}")')
+
+        if browsertrix := item.get_media_by_id("browsertrix"):
+            batch_if_valid("wacz", "\n".join(browsertrix.urls))
+            batch_if_valid(
+                "replaywebpage",
+                "\n".join(
+                    [
+                        f"https://replayweb.page/?source={quote(wacz)}#view=pages&url={quote(item.get_url())}"
+                        for wacz in browsertrix.urls
+                    ]
+                ),
+            )
+
+        @retry(
+            wait_exponential_multiplier=1,
+            stop_max_attempt_number=5,
+        )
+        def batch_set_cell_with_retry(gw, cell_updates: list):
+            gw.batch_set_cell(cell_updates)
+
+        batch_set_cell_with_retry(gw, cell_updates)
+
+    def _safe_status_update(self, item: Metadata, new_status: str) -> None:
+        try:
+            gw, row = self._retrieve_gsheet(item)
+            gw.set_cell(row, "status", new_status)
+        except Exception as e:
+            # the row keeps its previous status - if that's 'Archive in progress' the next run relabels it
+            logger.error(f"Unable to set status {new_status!r}, row may be stuck: {e}: {traceback.format_exc()}")
+
+    def _safe_archive_date_update(self, item: Metadata) -> None:
+        """Update the archive date column with current timestamp"""
+        try:
+            gw, row = self._retrieve_gsheet(item)
+            current_time = datetime.now(timezone.utc).isoformat()
+            gw.set_cell(row, "date", current_time)
+        except Exception as e:
+            logger.error(f"Unable to update archive date: {e}: {traceback.format_exc()}")
+
+    def _retrieve_gsheet(self, item: Metadata) -> Tuple[GWorksheet, int]:
+        gsheet = item.get_context("gsheet")
+        if not gsheet:
+            raise RuntimeError("Unable to retrieve Gsheet, GsheetDB must be used alongside GsheetFeeder.")
+        gw: GWorksheet = gsheet.get("worksheet")
+        row: int = gsheet.get("row")
+
+        return gw, row

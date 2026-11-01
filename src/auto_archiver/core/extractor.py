@@ -1,0 +1,184 @@
+"""The `extractor` module defines the base functionality for implementing extractors in the media archiving framework.
+This class provides common utility methods and a standard interface for extractors.
+
+Factory method to initialize an extractor instance based on its name.
+
+
+"""
+
+from __future__ import annotations
+from abc import abstractmethod
+from contextlib import suppress
+import mimetypes
+import os
+import time
+from urllib.parse import urlparse
+import requests
+from auto_archiver.utils.custom_logger import logger
+from retrying import retry
+import re
+
+from auto_archiver.core import Metadata, BaseModule
+from auto_archiver.utils.url import get_media_url_best_quality
+
+
+class Extractor(BaseModule):
+    """
+    Base class for implementing extractors in the media archiving framework.
+    Subclasses must implement the `download` method to define platform-specific behavior.
+    """
+
+    valid_url: re.Pattern = None
+
+    def cleanup(self) -> None:
+        """
+        Called when extractors are done, or upon errors, cleanup any resources
+        """
+        pass
+
+    def sanitize_url(self, url: str) -> str:
+        """
+        Used to clean unnecessary URL parameters OR unfurl redirect links
+        """
+        return url
+
+    def match_link(self, url: str) -> re.Match:
+        """
+        Returns a match object if the given URL matches the valid_url pattern or False/None if not.
+
+        Normally used in the `suitable` method to check if the URL is supported by this extractor.
+
+        """
+        return self.valid_url.match(url)
+
+    def suitable(self, url: str) -> bool:
+        """
+        Returns True if this extractor can handle the given URL
+
+        Should be overridden by subclasses
+
+        """
+        if self.valid_url:
+            return self.match_link(url) is not None
+
+        return True
+
+    def _guess_file_type(self, path: str) -> str:
+        """
+        Receives a URL or filename and returns global mimetype like 'image' or 'video'
+        see https://developer.mozilla.org/en-US/docs/Web/HTTP/Basics_of_HTTP/MIME_types/Common_types
+        """
+        mime = mimetypes.guess_type(path)[0]
+        if mime is not None:
+            return mime.split("/")[0]
+        return ""
+
+    MAX_429_ATTEMPTS = 3
+    MAX_429_WAIT_SECONDS = 60
+    MAX_DROPPED_ATTEMPTS = 3
+
+    def _retry_after_seconds(self, retry_after: str | None, default: int) -> int:
+        """Seconds to wait from a Retry-After header (delta-seconds only, not the HTTP-date form), capped"""
+        try:
+            wait = int(retry_after)
+        except (TypeError, ValueError):
+            wait = default
+        return max(1, min(wait, self.MAX_429_WAIT_SECONDS))
+
+    @retry(wait_random_min=500, wait_random_max=3500, stop_max_attempt_number=5)
+    def download_from_url(
+        self, url: str, to_filename: str = None, verbose=True, try_best_quality=False, quiet_on_failure=False
+    ) -> str:
+        """
+        downloads a URL to provided filename, or inferred from URL, returns local filename
+        Warning: if try_best_quality is True, it will return a tuple of (filename, best_quality_url) if the download was successful.
+        """
+        if any(url.startswith(x) for x in ["blob:", "data:"]):
+            return None, url if try_best_quality else None
+
+        if try_best_quality:
+            with suppress(Exception):
+                # Attempt to download the original URL. This can fail (e.g. the CDN URL has expired/404s),
+                # in which case callers fall back to the WARC-captured copy, so a failure here isn't an error.
+                best_quality_url = get_media_url_best_quality(url)
+                orig_download = self.download_from_url(best_quality_url, to_filename, verbose, quiet_on_failure=True)
+                if orig_download:
+                    return orig_download, best_quality_url
+
+        if not to_filename:
+            to_filename = url.split("/")[-1].split("?")[0]
+            if len(to_filename) > 64:
+                to_filename = to_filename[-64:]
+        to_filename = os.path.join(self.tmp_dir, to_filename)
+        if verbose:
+            logger.debug(f"Downloading {to_filename=}")
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/81.0.4044.138 Safari/537.36"
+        }
+        try:
+            # DM 29th Oct 26 - a connection dropped mid-download (eg IncompleteRead from cdninstagram) used to lose the
+            # file as the @retry above never sees the exception (caught below), so download it again from scratch.
+            # Only mid-download drops - DNS, SSL or refused connections won't fix themselves in a few seconds
+            for attempt in range(1, self.MAX_DROPPED_ATTEMPTS + 1):
+                try:
+                    filename = self._fetch_to_file(url, to_filename, headers)
+                    break
+                except requests.exceptions.ChunkedEncodingError as e:
+                    if attempt == self.MAX_DROPPED_ATTEMPTS:
+                        raise
+                    # quiet callers fall back to the WARC copy, so a retry isn't worth a warning there
+                    (logger.debug if quiet_on_failure else logger.warning)(
+                        f"Connection to {urlparse(url).netloc} dropped ({e}), downloading again in {5 * attempt}s "
+                        f"(attempt {attempt} of {self.MAX_DROPPED_ATTEMPTS})"
+                    )
+                    time.sleep(5 * attempt)
+            if try_best_quality:
+                return filename, url
+            return filename
+
+        except requests.RequestException as e:
+            if quiet_on_failure:
+                logger.debug(f"Failed to fetch the Media URL (will fall back to WARC copy): {e}")
+            else:
+                logger.warning(f"Failed to fetch the Media URL: {e}")
+        if try_best_quality:
+            return None, url
+
+    def _fetch_to_file(self, url: str, to_filename: str, headers: dict) -> str:
+        """GETs url into to_filename (adding an extension from the Content-Type if needed), returns the filename"""
+        # DM 8th Oct 26 - a CDN 429 (eg cdninstagram) used to fail straight away as the @retry above never sees
+        # the exception (caught below), so back off and retry here, honouring Retry-After (capped)
+        for attempt in range(1, self.MAX_429_ATTEMPTS + 1):
+            d = requests.get(url, stream=True, headers=headers, timeout=30)
+            if d.status_code != 429 or attempt == self.MAX_429_ATTEMPTS:
+                break
+            wait = self._retry_after_seconds(d.headers.get("Retry-After"), default=10 * attempt)
+            logger.warning(
+                f"HTTP 429 Too Many Requests from {urlparse(url).netloc}, retrying in {wait}s "
+                f"(attempt {attempt} of {self.MAX_429_ATTEMPTS})"
+            )
+            d.close()
+            time.sleep(wait)
+        d.raise_for_status()
+
+        # get mimetype from the response headers
+        if not mimetypes.guess_type(to_filename)[0]:
+            content_type = d.headers.get("Content-Type") or self._guess_file_type(url)
+            extension = mimetypes.guess_extension(content_type)
+            if extension:
+                to_filename += extension
+
+        with open(to_filename, "wb") as f:
+            for chunk in d.iter_content(chunk_size=8192):
+                f.write(chunk)
+        return to_filename
+
+    @abstractmethod
+    def download(self, item: Metadata) -> Metadata | False:
+        """
+        Downloads the media from the given URL and returns a Metadata object with the downloaded media.
+
+        If the URL is not supported or the download fails, this method should return False.
+
+        """
+        pass

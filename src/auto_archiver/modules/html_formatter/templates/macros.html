@@ -1,0 +1,155 @@
+{% macro display_media(m, links, main_url) -%}
+
+{% for url in m.urls %}
+{% if url | length == 0 %}
+No URL available for {{ m.key }}.
+{% elif 'http://' in url or 'https://' in url or url.startswith('/') %}
+{% if 'image' in m.mimetype %}
+<div>
+    <a href="{{ url }}">
+        <img src="{{ url }}" style="max-height:400px;max-width:400px;"></img>
+    </a>
+
+    <div>
+        Reverse Image Search:&nbsp;
+        <a href="https://www.google.com/searchbyimage?sbisrc=4chanx&image_url={{ url | quote }}&safe=off">Google</a>,&nbsp;
+        <a href="https://lens.google.com/uploadbyurl?url={{ url | quote }}">Google Lens</a>,&nbsp;
+        <a href="https://yandex.ru/images/touch/search?rpt=imageview&url={{ url | quote }}">Yandex</a>,&nbsp;
+        <a href="https://www.bing.com/images/search?view=detailv2&iss=sbi&form=SBIVSP&sbisrc=UrlPaste&q=imgurl:{{ url | quote }}">Bing</a>,&nbsp;
+        <a href="https://www.tineye.com/search/?url={{ url | quote }}">Tineye</a>
+    </div>
+
+    <div>
+        Image Forensics:&nbsp;
+        <a href="https://fotoforensics.com/?url={{ url | quote }}">FotoForensics</a>,&nbsp;
+        <a href="https://mever.iti.gr/forensics/?image={{ url }}">Media Verification Assistant</a>
+    </div>
+    <p></p>
+</div>
+{% elif 'video' in m.mimetype %}
+<div>
+    <video src="{{ url }}" controls style="max-height:400px;max-width:600px;">
+        Your browser does not support the video element.
+    </video>
+</div>
+{% elif 'application/pdf' in m.mimetype %}
+<div>
+    <embed src="{{ url }}" width="100%" height="400px"/>
+</div>
+{% elif 'audio' in m.mimetype %}
+<div>
+    <audio controls>
+        <source src="{{ url }}" type="{{ m.mimetype }}">
+        Your browser does not support the audio element.
+    </audio>
+</div>
+{% elif m.filename | get_extension == ".wacz" %}
+<a href="https://replayweb.page/?source={{ url | quote }}#view=pages&url={{ main_url }}">replayweb</a>
+
+{% elif m.filename | get_extension == ".pem" %}
+<code class="pem-certificate" pem="{{url}}"></code>
+
+{% elif 'text' in m.mimetype %}
+<div>PREVIEW:<br/><code><pre class="text-preview" url="{{url}}"></pre></code></div>
+
+{% elif m.filename | get_extension == ".mhtml" %}
+<div><a href="{{ url }}" download="">download</a> to view offline in browser</div>
+
+{% else %}
+No preview available for <code>{{ m.key }}</code>.
+{% endif %}
+{% else %}
+{{ m.url | urlize }}
+{% endif %}
+<!-- don't show links for mhtml files as rendered above -->
+{% if links and m.filename | get_extension != ".mhtml" %}
+<a href="{{ url }}">open</a> or
+<a href="{{ url }}" download="">download</a> or
+{{ copy_urlize(url, "copy") }}
+
+<br>
+{% endif %}
+{% endfor %}
+
+{%- endmacro -%}
+
+{% macro copy_urlize(val, href_text) -%}
+
+{% if val | is_list %}
+    {% for item in val %}
+    {{ copy_urlize(item) }}
+    {% endfor %}
+
+{% elif val is mapping %}
+<ul>
+    {% for key in val %}
+    <li>
+        <b>{{ key }}:</b> {{ copy_urlize(val[key]) }}
+    </li>
+    {% endfor %}
+</ul>
+
+{% else %}
+{% if href_text | length == 0 %}
+<span class="copy">{{ val | string | urlize }}</span>
+{% else %}
+<span class="copy" copy-value="{{val}}">{{ href_text | string | urlize }}</span>
+{% endif %}
+{% endif %}
+
+{%- endmacro -%}
+
+
+{% macro display_recursive(prop, skip_display) -%}
+    {% if prop is mapping %}
+    <div class="center copy" copy-value64='{{prop | json_dump_b64}}'>Copy as JSON</div>
+    <ul>
+        {% for subprop in prop %}
+            <li>
+                <b>{{ subprop }}:</b>
+                {{ display_recursive(prop[subprop]) }}
+            </li>
+        {% endfor %}
+    </ul>
+
+    {% elif prop | is_list %}
+        {% for item in prop %}
+            <li>
+                {{ display_recursive(item) }}
+            </li>
+        {% endfor %}
+
+
+    {% elif prop | is_media %}
+        {% if not skip_display %}
+            {{ display_media(prop, true) }}
+        {% endif %}
+        <ul>
+            <li><b>key:</b> <span class="copy">{{ prop.key }}</span></li>
+            <li><b>type:</b> <span class="copy">{{ prop.mimetype }}</span></li>
+            {% for subprop in prop.properties %}
+                
+
+                {% if prop.properties[subprop] | is_list %}
+                <p></p>
+                <div>
+                    <b class="collapsible" title="expand">{{ subprop }} ({{ prop.properties[subprop] | length }}):</b>
+                    <p></p>
+                    <div class="collapsible-content">
+                        {% for subsubprop in prop.properties[subprop] %}
+                            {{ display_recursive(subsubprop) }}
+                        {% endfor %}
+                    </div>
+                </div>
+                <p></p>
+                {% elif prop.properties[subprop] | string | length > 1 %}
+                <li><b>{{ subprop }}:</b> {{ copy_urlize(prop.properties[subprop]) }}</li>
+                {% endif %}
+
+            {% endfor %}
+
+        </ul>
+    {% else %}
+        {{ copy_urlize(prop) }}
+    {% endif %}
+{%- endmacro -%}

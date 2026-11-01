@@ -1,0 +1,351 @@
+{# templates/results.html #}
+{% import 'macros.html' as macros %}
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="utf-8">
+    <link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Roboto:300,300italic,700,700italic">
+    <title>{{ url }}</title>
+    <style>
+        html {
+            font-family: 'Roboto', sans-serif;
+        }
+
+        h2 {
+            white-space: normal;
+            overflow-wrap: break-word;
+            word-break: break-word;
+        }
+
+        table {
+            table-layout: fixed;
+            width: 90%;
+        }
+
+        table td {
+            word-wrap: break-word;
+            overflow-wrap: break-word;
+            padding: 5px;
+        }
+
+        table,
+        th,
+        td {
+            margin: auto;
+            border: 1px solid;
+            border-collapse: collapse;
+            vertical-align: top;
+        }
+
+        table.metadata td:first-child {
+            text-align: center;
+        }
+
+        table.content td:nth-child(2),
+        .center {
+            text-align: center;
+        }
+
+        .copy:hover {
+            background: aliceblue;
+            cursor: copy;
+        }
+
+        #notification {
+            position: fixed;
+            right: 20px;
+            top: 20px;
+            background: aquamarine;
+            box-shadow: 6px 8px 5px 0px #000000;
+            padding: 10px;
+            font-size: large;
+            display: none;
+        }
+
+        img,
+        video {
+            filter: gray;
+            -webkit-filter: grayscale(1);
+            filter: grayscale(1);
+        }
+
+        /* Disable grayscale on hover */
+        /* img:hover,
+        video:hover {
+            -webkit-filter: grayscale(0);
+            filter: none;
+        } */
+
+
+        .collapsible {
+            background-color: #777;
+            color: white;
+            cursor: pointer;
+            padding: 5px;
+            margin: 10px;
+            width: 100%;
+            border: none;
+            text-align: left;
+            outline: none;
+            font-size: 15px;
+        }
+
+        .active,
+        .collapsible:hover {
+            background-color: #555;
+        }
+
+        .collapsible-content {
+            padding: 0 18px;
+            display: none;
+            overflow: hidden;
+            background-color: #f1f1f1;
+        }
+
+        .pem-certificate,
+        .text-preview {
+            text-align: left;
+            font-size: small;
+        }
+
+        .text-preview {
+            padding-left: 10px;
+            padding-right: 10px;
+            max-height: 300px;
+            overflow: auto;
+            white-space: pre-wrap;
+        }
+    </style>
+</head>
+
+<body>
+    <div id="notification"></div>
+    <h2>Archived media for <span class="copy">{{ url }}</span> - <a href="{{ url }}">open</a></h2>
+    {% if title | string | length > 0 %}
+    <p><b>title:</b> '<span class="copy">{{ title }}</span>'</p>
+    {% endif %}
+    <h2 class="center">content {{ media | length }} item(s)</h2>
+    <form class="center">
+        <label>
+            <input type="checkbox" id="safe-media-view" checked>
+            Safe Media View
+        </label>
+    </form>
+    <table class="content">
+        <tr>
+            <th>about</th>
+            <th>files and preview</th>
+        </tr>
+        <tbody>
+            {% for m in media %}
+            <tr>
+                <td>
+                    {{ macros.display_recursive(m, true) }}
+                </td>
+                <td>
+                    {{ macros.display_media(m, true, url) }}
+                </td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+    <h2 class="center">metadata</h2>
+    <table class="metadata">
+        <tr>
+            <th>key</th>
+            <th>value</th>
+        </tr>
+        {% for key in metadata %}
+        <tr>
+            <td>{{ key }}</td>
+            <td>
+                {% if metadata[key] is mapping %}
+                <div class="center copy" copy-value64='{{metadata[key] | json_dump_b64}}'>Copy as JSON</div>
+                {% endif %}
+                {{ macros.copy_urlize(metadata[key]) }}
+            </td>
+        </tr>
+        {% endfor %}
+    </table>
+
+    <p class="center">Made with <a href="https://github.com/bellingcat/auto-archiver">bellingcat/auto-archiver</a>
+        v{{ version }}</p>
+    {% if git_commit_hash %}
+    <p class="center">Running code commit:
+        {% if git_commit_url %}
+        <a href="{{ git_commit_url }}">{{ git_commit_hash }}</a>
+        {% else %}
+        {{ git_commit_hash }}
+        {% endif %}
+    </p>
+    {% endif %}
+</body>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/forge/0.10.0/forge.min.js"></script>
+<script defer>
+    // partial decode of SSL certificates
+    function decodeCertificate(sslCert) {
+        var cert = forge.pki.certificateFromPem(sslCert);
+        return `SSL CERTIFICATE PREVIEW:<br/><ul>
+            <li><b>Subject:</b> <span class="copy">${cert.subject.attributes.map(attr => `${attr.shortName}: ${attr.value}`).join(", ")}</span></li>
+            <li><b>Issuer:</b> <span class="copy">${cert.issuer.attributes.map(attr => `${attr.shortName}: ${attr.value}`).join(", ")}</span></li>
+            <li><b>Valid From:</b> <span class="copy">${cert.validity.notBefore}</span></li>
+            <li><b>Valid To:</b> <span class="copy">${cert.validity.notAfter}</span></li>
+            <li><b>Serial Number:</b> <span class="copy">${cert.serialNumber}</span></li>
+        </ul>`;
+    }
+
+    async function run() {
+        let setupFunctions = [
+            previewCertificates,
+            previewText,
+            enableCopyLogic,
+            enableCollapsibleLogic,
+            setupSafeView
+        ];
+        setupFunctions.forEach(async f => {
+            try {
+                await f();
+            } catch (e) {
+                console.error(`Error in ${f.name}: ${e}`);
+            }
+        });
+    }
+
+    async function previewCertificates() {
+        await Promise.all(
+            Array.from(document.querySelectorAll(".pem-certificate")).map(async el => {
+                let certificate = await (await fetch(el.getAttribute("pem"))).text();
+                el.innerHTML = decodeCertificate(certificate);
+
+                let cyberChefUrl =
+                    `https://gchq.github.io/CyberChef/#recipe=Parse_X.509_certificate('PEM')&input=${btoa(certificate).replace(/=+$/, '')}`;
+                // create a new anchor with this url and append after the code
+                let a = document.createElement("a");
+                a.href = cyberChefUrl;
+                a.textContent = "Full certificate details";
+                el.parentElement.appendChild(a);
+            })
+        );
+        console.log("certificate preview done");
+    }
+
+    async function previewText() {
+        await Promise.all(
+            Array.from(document.querySelectorAll(".text-preview")).map(async el => {
+                let textContent = await (await fetch(el.getAttribute("url"))).text();
+                el.textContent = textContent;
+            })
+        );
+        console.log("text preview done");
+    }
+
+    // notification logic
+    const notification = document.getElementById("notification");
+
+    function showNotification(message, miliseconds) {
+        notification.style.display = "block";
+        notification.innerText = message;
+        setTimeout(() => {
+            notification.style.display = "none";
+            notification.innerText = "";
+        }, miliseconds || 1000)
+    }
+
+    // copy logic
+    async function enableCopyLogic() {
+        await Promise.all(
+            Array.from(document.querySelectorAll(".copy")).map(el => {
+                el.onclick = () => {
+                    document.execCommand("copy");
+                }
+                el.addEventListener("copy", (e) => {
+                    e.preventDefault();
+                    if (e.clipboardData) {
+                        if (el.hasAttribute("copy-value")) {
+                            e.clipboardData.setData("text/plain", el.getAttribute("copy-value"));
+                        } else if (el.hasAttribute("copy-value64")) {
+                            // TODO: figure out how to decode unicode chars into utf-8
+                            e.clipboardData.setData("text/plain", new String(atob(el.getAttribute(
+                                "copy-value64"))));
+                        } else {
+                            e.clipboardData.setData("text/plain", el.textContent);
+                        }
+                        console.log(e.clipboardData.getData("text"))
+                        showNotification("copied!")
+                    }
+                })
+            })
+        )
+        console.log("copy logic enabled");
+    }
+
+    // collapsibles
+    async function enableCollapsibleLogic() {
+        let coll = document.getElementsByClassName("collapsible");
+        for (let i = 0; i < coll.length; i++) {
+            await new Promise(resolve => {
+                coll[i].addEventListener("click", function () {
+                    this.classList.toggle("active");
+                    // let content = this.nextElementSibling;
+                    let content = this.parentElement.querySelector(".collapsible-content");
+                    if (content.style.display === "block") {
+                        content.style.display = "none";
+                    } else {
+                        content.style.display = "block";
+                    }
+                });
+                resolve();
+            })
+        }
+        console.log("collapsible logic enabled");
+    }
+
+    async function setupSafeView() {
+        // logic for enabled/disabled greyscale
+        // Get references to the checkboxes and images/videos
+        const safeImageViewCheckbox = document.getElementById('safe-media-view');
+        const visualPreviews = document.querySelectorAll('img, video,embed');
+
+        // Function to toggle grayscale effect
+        function toggleGrayscale() {
+            visualPreviews.forEach(element => {
+                if (safeImageViewCheckbox.checked) {
+                    // Enable grayscale effect
+                    element.style.filter = 'grayscale(1)';
+                    element.style.webkitFilter = 'grayscale(1)';
+                } else {
+                    // Disable grayscale effect
+                    element.style.filter = 'none';
+                    element.style.webkitFilter = 'none';
+                }
+            });
+        }
+
+        // Add event listener to the checkbox to trigger the toggleGrayscale function
+        safeImageViewCheckbox.addEventListener('change', toggleGrayscale);
+
+        // Handle the hover effect using JavaScript
+        visualPreviews.forEach(element => {
+            element.addEventListener('mouseenter', () => {
+                // Disable grayscale effect on hover
+                element.style.filter = 'none';
+                element.style.webkitFilter = 'none';
+            });
+
+            element.addEventListener('mouseleave', () => {
+                // Re-enable grayscale effect if checkbox is checked
+                if (safeImageViewCheckbox.checked) {
+                    element.style.filter = 'grayscale(1)';
+                    element.style.webkitFilter = 'grayscale(1)';
+                }
+            });
+        });
+        toggleGrayscale();
+        console.log("grayscale logic enabled");
+    }
+
+    run();
+</script>
+
+</html>

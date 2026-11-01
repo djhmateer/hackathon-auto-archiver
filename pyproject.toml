@@ -1,0 +1,135 @@
+[build-system]
+requires = ["poetry-core>=2.0.0,<3.0.0"]
+build-backend = "poetry.core.masonry.api"
+
+[project]
+name = "auto-archiver"
+version = "1.2.9"
+description = "Automatically archive links to videos, images, and social media content from Google Sheets (and more)."
+
+requires-python = ">=3.10,<3.13"
+license = "MIT"
+authors = [
+    { name = "Bellingcat", email = "tech@bellingcat.com" },
+]
+readme = "README.md"
+keywords = ["archive", "oosi", "osint", "scraping"]
+classifiers = [
+    "Intended Audience :: Developers",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3"
+]
+
+dependencies = [
+    "gspread (>=0.0.0)",
+    "beautifulsoup4 (>=0.0.0)",
+    "bs4 (>=0.0.0)",
+    "loguru (>=0.0.0)",
+    "ffmpeg-python (>=0.0.0)",
+    "selenium (>=0.0.0)",
+    "telethon (>=0.0.0)",
+    "google-api-python-client (>=0.0.0)",
+    "google-auth-httplib2 (>=0.0.0)",
+    "google-auth-oauthlib (>=0.0.0)",
+    "oauth2client (>=0.0.0)",
+    "pdqhash (>=0.0.0)",
+    "pillow (>=0.0.0)",
+    "python-slugify (>=0.0.0)",
+    "dateparser (>=0.0.0)",
+    "python-twitter-v2 (>=0.0.0)",
+    "instaloader (>=0.0.0)",
+    "tqdm (>=0.0.0)",
+    "jinja2 (>=0.0.0)",
+    "boto3 (>=1.28.0,<2.0.0)",
+    "dataclasses-json (>=0.0.0)",
+    "numpy (==2.1.3)",
+    "requests[socks] (>=0.0.0)",
+    "warcio (>=0.0.0)",
+    "jsonlines (>=0.0.0)",
+    "pysubs2 (>=0.0.0)",
+    "retrying (>=0.0.0)",
+    "rich-argparse (>=1.6.0,<2.0.0)",
+    "ruamel-yaml (>=0.18.10,<0.19.0)",
+    "rfc3161-client (>=1.0.5)",
+    "cryptography (>=46.0.3)",
+    "opentimestamps (>=0.4.5,<0.5.0)",
+    "bgutil-ytdlp-pot-provider (>=1.0.0)",
+    "yt-dlp[curl-cffi,default] (>=2025.5.22)",
+    "secretstorage (>=3.3.3,<4.0.0)",
+    "seleniumbase (>=4.36.4,<5.0.0)",
+    # took out as getting install errors using python3.12 on prod
+    # this is just used for testing
+    
+    # works on dev as as long as I dont include pyperclip below.. 
+    "pyautogui (>=0.9.54,<0.10.0)",
+    #"pyperclip (==1.8.2)", 
+    "pyperclip (>=0.0.0)",
+    "pytesseract (>=0.3.13,<0.4.0)", 
+]
+
+# uwazi API https://github.com/huridocs/python_uwazi_API
+# needs 1.26.7 
+# but yt-dlp needs 1.26.17 or higher
+# selenium downgrades to 4.32.0 from 4.33.0 when I force 1.26.17
+# urllib3 (==1.26.7)"
+
+[tool.poetry.group.dev.dependencies]
+pytest = "^8.3.4"
+autopep8 = "^2.3.1"
+pytest-loguru = "^0.4.0"
+pytest-mock = "^3.14.0"
+ruff = "^0.15.2"
+pre-commit = "^4.1.0"
+
+[tool.poetry.group.docs.dependencies]
+#sphinx = "^8.1.3"
+#sphinx-autoapi = "^3.4.0"
+sphinxcontrib-mermaid = "^1.0.0"
+sphinx-autobuild = "^2024.10.3"
+sphinx-copybutton = "^0.5.2"
+myst-parser = "^4.0.0"
+sphinx-book-theme = "^1.1.3"
+linkify-it-py = "^2.0.3"
+
+
+[project.scripts]
+auto-archiver = "auto_archiver.__main__:main"
+auto-archiver-status = "auto_archiver.modules.platform_status.status_cli:main"
+
+[project.urls]
+homepage = "https://github.com/bellingcat/auto-archiver"
+repository = "https://github.com/bellingcat/auto-archiver"
+documentation = "https://github.com/bellingcat/auto-archiver"
+
+
+[tool.pytest.ini_options]
+markers = [
+    "download: marks tests that download content from the network",
+    "incremental: marks a class to run tests incrementally. If a test fails in the class, the remaining tests will be skipped",
+]
+
+[tool.ruff]
+#exclude = ["docs"]
+line-length = 120
+# Remove this for a more detailed lint report
+output-format = "concise"
+# TODO: temp ignore rule for timestamping_enricher to allow for open PR
+exclude = ["src/auto_archiver/modules/timestamping_enricher/*"]
+
+
+[tool.ruff.lint]
+# Extend the rules to check for by adding them to this option:
+# See documentation for more details: https://docs.astral.sh/ruff/rules/
+#extend-select = ["B"]
+
+[tool.ruff.lint.per-file-ignores]
+# Ignore import violations in __init__.py files
+"__init__.py" = ["F401", "F403"]
+# Ignore 'useless expression' in manifest files.
+"__manifest__.py" = ["B018"]
+
+
+[tool.ruff.format]
+docstring-code-format = false
+

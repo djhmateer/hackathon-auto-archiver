@@ -1,0 +1,163 @@
+import json
+from auto_archiver.utils.custom_logger import logger
+import time
+import requests
+from urllib.parse import urlparse
+from auto_archiver.core import Extractor, Enricher
+from auto_archiver.utils import url as UrlUtil
+from auto_archiver.core import Metadata
+
+
+class WaybackExtractorEnricher(Enricher, Extractor):
+    """
+    Submits the current URL to the webarchive and returns a job_id or completed archive.
+
+    The Wayback machine will rate-limit IP heavy usage.
+    """
+
+    def download(self, item: Metadata) -> Metadata:
+        # this new Metadata object is required to avoid duplication
+        result = Metadata()
+        result.merge(item)
+        if self.enrich(result):
+            return result.success("wayback")
+        # DM 29th Sep 26 - remember the failure on the orchestrator's item so the enricher step doesn't
+        # resubmit the same URL straight away (IA hands back the same failed job_id, and a slow POST can cost minutes)
+        item.set_context("wayback_failed", True)
+
+    def enrich(self, to_enrich: Metadata) -> bool:
+        proxies = {}
+        if self.proxy_http:
+            proxies["http"] = self.proxy_http
+        if self.proxy_https:
+            proxies["https"] = self.proxy_https
+
+        url = to_enrich.get_url()
+        if UrlUtil.is_auth_wall(url):
+            logger.debug("[SKIP] WAYBACK since url is behind AUTH WALL")
+            return
+
+        if to_enrich.get("wayback"):
+            logger.info(f"Wayback enricher had already been executed: {to_enrich.get('wayback')}")
+            return True
+
+        if to_enrich.get_context("wayback_failed"):
+            logger.debug("[SKIP] WAYBACK since it already failed for this url as an extractor")
+            return False
+
+        logger.debug("Calling Wayback")
+
+        ia_headers = {"Accept": "application/json", "Authorization": f"LOW {self.key}:{self.secret}"}
+        # IA can't resolve a non-ASCII hostname (e.g. a .рф domain) - send it as punycode (xn--...)
+        parsed = urlparse(url)
+        if not parsed.netloc.isascii():
+            netloc = parsed.hostname.encode("idna").decode() + (f":{parsed.port}" if parsed.port else "")
+            url = parsed._replace(netloc=netloc).geturl()
+            logger.debug(f"Sending non-ASCII hostname {parsed.hostname} to Wayback as {netloc}")
+        post_data = {"url": url}
+        if self.if_not_archived_within:
+            post_data["if_not_archived_within"] = self.if_not_archived_within
+        # see https://docs.google.com/document/d/1Nsv52MvSjbLb2PCpHlat0gkzw0EvtSgpKHu4mk0MnrA for more options
+		# DM 8th July 25 - are retries enabled on requests.post???
+        # DM 4th Jun 25 - the post timeout will be 4:35 with 10 attempts.
+        # we need this to be successful as need the job_id to check the status to put in the metadata.
+        attempt = 1
+        success = False
+        while attempt <= 10:
+            try:
+                r = requests.post(
+                    "https://web.archive.org/save/", headers=ia_headers, data=post_data, proxies=proxies, timeout=60
+                )
+                success = True
+            except Exception as e:
+                # DM 3rd Jun 25 - max retries exceeded with url: /save/ catch
+                logger.warning(f"Problem posting to wayback - retrying {attempt} error - {e}")
+                time.sleep(5 * attempt) # linear backoff
+                attempt += 1
+            if success:
+                break # out of while loop
+
+        if not success:
+            logger.error(f"Error calling Wayback - given up after {attempt} attempts.")
+            return False
+
+        if r.status_code != 200:
+            # DM 6th Jun 25 - this is a workaround for a wayback issue where it returned a non json response text 
+            try:
+                error_content = r.json()
+            except requests.exceptions.JSONDecodeError:
+                error_content = r.text
+            logger.error(em := f"Internet archive failed with status of {r.status_code}: {error_content}")
+            to_enrich.set("wayback", em)
+            return False
+
+        # check job status
+        try:
+            job_id = r.json().get("job_id")
+            if not job_id:
+                # for some sites likes twitter, with 'we're facing some limitation' this is business as usual for us, so not an error
+                if UrlUtil.domain_for_url(url).removeprefix('www.') in ('twitter.com', 'x.com'):
+                    logger.info(f"Wayback failed and we know about this with Twitter/X with {r.json()} - if it starts working from wayback side, this will be fine")
+                    return False
+                elif r.json().get("status_ext") in (
+                    "error:blocked-url",
+                    "error:invalid-host-resolution",
+                    "error:host-crawling-paused",
+                ):
+                    # URL is on the IA Save Page Now block list, IA can't resolve the host (eg archive.is), or IA has
+                    # paused crawling the host - not a problem with this code
+                    logger.warning(f"Wayback failed with {r.json()}")
+                    return False
+                else:
+                    logger.error(f"Wayback failed with {r.json()}")
+                    return False
+        except json.decoder.JSONDecodeError:
+            logger.error(f"Expected a JSON with job_id from Wayback and got {r.text}")
+            return False
+
+        # waits at most timeout seconds until job is completed, otherwise only enriches the job_id information
+        start_time = time.time()
+        wayback_url = False
+        attempt = 1
+        while not wayback_url and time.time() - start_time <= self.timeout:
+            try:
+                logger.debug(f"GETting status for {job_id=} ({attempt=})")
+                r_status = requests.get(
+                    f"https://web.archive.org/save/status/{job_id}", headers=ia_headers, proxies=proxies, timeout=30
+                )
+                r_json = r_status.json()
+                if r_status.status_code == 200 and r_json["status"] == "success":
+                    wayback_url = f"https://web.archive.org/web/{r_json['timestamp']}/{r_json['original_url']}"
+                elif r_status.status_code != 200 or r_json["status"] != "pending":
+                    # these failures are the target site or the IA infrastructure refusing the request,
+                    # not a problem with this code, and other extractors still run afterwards
+                    if r_json.get("status_ext") in ["error:blocked-url", "error:unauthorized"]:
+                        to_enrich.set("wayback", r_json.get("status_ext"))
+                        logger.warning(f"Wayback cannot currently archive the URL, skipping: {r_json}")
+                    else:
+                        logger.warning(f"Wayback failed with {r_json}")
+                    return False
+            except requests.exceptions.RequestException as e:
+                logger.info(f"Attempt {attempt} of fetching status for {url=} failed which is okay due to: {e}")
+                logger.info(f"If after {self.timeout} seconds the wayback url is not found, then we will just put the check status link in the metadata")
+                break
+            except json.decoder.JSONDecodeError:
+                logger.error(f"Expected a JSON from Wayback status check and got {r_status.text}")
+                break
+            except Exception as e:
+                logger.warning(f"error fetching status due to: {e}")
+            if not wayback_url:
+                attempt += 1
+                # if we try too many times here it will affect the next POST to wayback
+                # which we really need to be successful.
+                # for 30seconds timeout (in yaml) this gives 3 attempts
+                time.sleep(5 * attempt)  # linear backoff. todo: exponential backoff
+
+        if wayback_url:
+            to_enrich.set("wayback", wayback_url)
+        else:
+            to_enrich.set(
+                "wayback", {"job_id": job_id, "check_status": f"https://web.archive.org/save/status/{job_id}"}
+            )
+        to_enrich.set("check wayback", f"https://web.archive.org/web/*/{url}")
+        return True
