@@ -14,9 +14,10 @@ import psycopg
 from auto_archiver.job_queue import db, migrate, sync, writer
 from auto_archiver.utils.custom_logger import logger
 
-CYCLE_SECONDS = 30
-# sync reads every sheet, so it runs less often
-SYNC_SECONDS = 60
+# an idle writer doesn't call Google, so this only costs local SQL
+CYCLE_SECONDS = 5
+# sync reads every sheet, so it runs less often. 30 is for testing: go back to 60 before moving the busy sheets
+SYNC_SECONDS = 30
 
 
 def run_step(name: str, step) -> None:
