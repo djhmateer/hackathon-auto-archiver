@@ -220,7 +220,9 @@ class WorkerSupervisor:
             self._fail(conn, job, running.kill_reason)
             self.quick_failures = []
         elif current["work_started_at"] is None:
-            logger.error(f"Job {job['id']} exited during setup, see {self.dir}/logs/child.out")
+            # negative is the signal that killed it. It may have had no chance to log anything
+            code = running.process.poll()
+            logger.error(f"Job {job['id']} exited during setup with code {code}, see {self.dir}/logs/child.out")
             db.release_setup_failure(conn, job["id"], job["lease_token"])
             self._record_quick_failure(job["sheet_id"], conn)
         else:

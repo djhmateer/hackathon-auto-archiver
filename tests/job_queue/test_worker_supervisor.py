@@ -169,6 +169,15 @@ def test_stolen_lease_kills_the_child_and_changes_nothing(conn, make_supervisor,
 # exits
 
 
+def test_exit_during_setup_logs_the_exit_code(conn, make_supervisor, children, caplog):
+    add_job(conn, add_sheet(conn))
+    sup = make_supervisor()
+    sup.tick(conn)
+    children[0].exit_code = -11
+    sup.tick(conn)
+    assert "exited during setup with code -11" in caplog.text
+
+
 def test_clean_finish_lets_it_claim_the_next_job(conn, make_supervisor, children):
     sheet = add_sheet(conn)
     first = add_job(conn, sheet, 2)
