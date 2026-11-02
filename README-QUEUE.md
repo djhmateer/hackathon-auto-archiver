@@ -62,7 +62,7 @@ Ubuntu 26.04. Pass the coordinator VM's IP:
 sudo apt-get update && sudo apt-get install -y git
 git clone <repo_url> /home/dave/auto-archiver
 cd /home/dave/auto-archiver
-bash scripts/job_queue/install-worker.sh <coordinator_ip>
+bash scripts/job_queue/install-worker.sh --coordinator-database <coordinator_ip>
 ```
 
 Run the script as your normal user, not root. It's safe to run again. It installs Firefox, geckodriver, Chrome, Docker, the browsertrix-crawler and YouTube token containers, Deno, ffmpeg, exiftool, tesseract, Python 3.12 and the project, then checks it can use Postgres. It doesn't start the worker, so then:

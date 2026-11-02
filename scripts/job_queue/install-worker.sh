@@ -4,7 +4,7 @@
 #
 # As your normal user, from a clone of the repo:
 #   git pull origin main
-#   bash scripts/job_queue/install-worker.sh <coordinator_ip>
+#   bash scripts/job_queue/install-worker.sh --coordinator-database <coordinator_ip>
 set -euo pipefail
 
 DB_NAME=auto_archiver
@@ -12,11 +12,11 @@ DB_USER=bob
 DB_PASSWORD=password
 GECKODRIVER_VERSION=0.37.1
 
-if [ $# -ne 1 ]; then
-    echo "Usage: bash scripts/job_queue/install-worker.sh <coordinator_ip>" >&2
+if [ $# -ne 2 ] || [ "$1" != "--coordinator-database" ]; then
+    echo "Usage: bash scripts/job_queue/install-worker.sh --coordinator-database <coordinator_ip>" >&2
     exit 1
 fi
-COORDINATOR_IP="$1"
+COORDINATOR_IP="$2"
 
 REPO="$(cd "$(dirname "$0")/../.." && pwd)"
 cd "$REPO"
@@ -84,9 +84,8 @@ poetry env use "$(uv python find 3.12)"
 poetry install --only main
 
 echo "=== Connection string and folders"
-if [ ! -f .env ]; then
-    echo "AA_DATABASE_URL=postgresql://$DB_USER:$DB_PASSWORD@$COORDINATOR_IP:5432/$DB_NAME" > .env
-fi
+# always written, so running this again with a corrected IP fixes it
+echo "AA_DATABASE_URL=postgresql://$DB_USER:$DB_PASSWORD@$COORDINATOR_IP:5432/$DB_NAME" > .env
 chmod 600 .env
 mkdir -p secrets "$HOME/aatmp"
 
