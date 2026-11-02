@@ -78,6 +78,9 @@ def _die_with_parent() -> None:
 def start_child(job: dict, worker_dir: str, extra_args: tuple = ()) -> subprocess.Popen:
     args = [
         sys.executable,
+        # a native crash prints its stack to child.out, instead of nothing
+        "-X",
+        "faulthandler",
         ARCHIVER_PATH,
         "--config",
         job["config"],

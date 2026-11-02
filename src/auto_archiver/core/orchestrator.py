@@ -628,6 +628,11 @@ Here's how that would look: \n\nsteps:\n  extractors:\n  - [your_extractor_name_
         except Exception as e:
             logger.error(f"{e}: {traceback.format_exc()}")
             exit(1)
+        except SystemExit as e:
+            # not an Exception, so something calling exit() during setup would otherwise leave no reason. 0 is --help
+            if e.code != 0:
+                logger.error(f"Exited during setup with code {e.code}: {traceback.format_exc()}")
+            raise
 
     def cleanup(self) -> None:
         logger.info("Cleaning up")

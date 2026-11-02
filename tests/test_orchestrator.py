@@ -497,3 +497,19 @@ def test_descendant_pids_finds_grandchildren():
         os.kill(pid, 9)
 
     assert len(pids) == 1  # the sleep
+
+
+def test_exit_during_setup_logs_where_it_happened(mocker, caplog):
+    mocker.patch.object(ArchivingOrchestrator, "setup", side_effect=SystemExit(3))
+    with pytest.raises(SystemExit) as e:
+        ArchivingOrchestrator()._command_line_run([])
+    assert e.value.code == 3
+    assert "Exited during setup with code 3" in caplog.text
+    assert "Traceback" in caplog.text
+
+
+def test_clean_exit_during_setup_logs_nothing(mocker, caplog):
+    mocker.patch.object(ArchivingOrchestrator, "setup", side_effect=SystemExit(0))
+    with pytest.raises(SystemExit):
+        ArchivingOrchestrator()._command_line_run([])
+    assert "Exited during setup" not in caplog.text
