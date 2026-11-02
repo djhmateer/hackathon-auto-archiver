@@ -56,38 +56,27 @@ Postgres only accepts connections from subnets the VM is directly attached to. A
 
 ## Deploy a new worker VM
 
-There's no install script for workers yet, so these steps are manual and haven't been tried on a new VM.
+Ubuntu 26.04. Pass the coordinator VM's IP:
 
-1. Install what an existing worker has: Docker, the browsertrix-crawler image, `ffmpeg`, `exiftool`, `deno`, and anything else its configs use.
-2. Install Python 3.12, Poetry and the project:
+```bash
+sudo apt-get update && sudo apt-get install -y git
+git clone <repo_url> /home/dave/auto-archiver
+cd /home/dave/auto-archiver
+bash scripts/job_queue/install-worker.sh <coordinator_ip>
+```
 
-   ```bash
-   git clone <repo_url> /home/dave/auto-archiver
-   cd /home/dave/auto-archiver
-   curl -LsSf https://astral.sh/uv/install.sh | sh
-   export PATH="$HOME/.local/bin:$PATH"
-   uv python install 3.12
-   uv tool install "poetry>=2.0.0,<3.0.0"
-   poetry env use "$(uv python find 3.12)"
-   poetry install --only main
-   ```
+Run the script as your normal user, not root. It's safe to run again. It installs Firefox, geckodriver, Chrome, Docker, the browsertrix-crawler and YouTube token containers, Deno, ffmpeg, exiftool, tesseract, Python 3.12 and the project, then checks it can use Postgres. It doesn't start the worker, so then:
 
-3. Copy `secrets/` from another worker with FileZilla. It must include every queued sheet's config, cookies and accounts, at the same paths as on the coordinator.
-4. Create `.env` in the repo root, using the coordinator VM's IP, and protect it with `chmod 600 .env`:
-
-   ```
-   AA_DATABASE_URL=postgresql://bob:password@<coordinator_ip>:5432/auto_archiver
-   ```
-
-5. Allow the daily reboot without a password, as cron workers do (`sudo -n /sbin/reboot`).
-6. Install and start the service. It runs 1 slot and reboots daily at 05:20 UK time, so edit the file to change either:
+1. Copy into `secrets/` with FileZilla every config the queue runs, with its service accounts, cookies, sessions and profiles, at the same paths as on the coordinator.
+2. Reboot, so the `docker` group applies: `sudo reboot`
+3. Start it, and watch the logs:
 
    ```bash
-   sudo cp scripts/job_queue/aa-worker-supervisor.service /etc/systemd/system/
-   sudo systemctl daemon-reload
-   sudo systemctl enable --now aa-worker-supervisor
+   sudo systemctl start aa-worker-supervisor
    journalctl -u aa-worker-supervisor -f
    ```
+
+The service runs 1 slot and reboots daily at 05:20 UK time. To change either, edit `/etc/systemd/system/aa-worker-supervisor.service`, then run `sudo systemctl daemon-reload`.
 
 Stay on 1 slot per VM until the fixes in "Running rows at once" in `queue-spec.md` are done. A VM should run cron or a worker supervisor, not both.
 
