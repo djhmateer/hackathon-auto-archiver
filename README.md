@@ -1,20 +1,29 @@
+<h1>Hackathon</h1>
+
+I work in human rights digital archiving and monitoring, with charitable investigative organisations in human rights and law, mostly in the UK. For the past 5 years, starting with https://osr4rightstools.org/, I've been using Bellingcat's open source auto-archiver through my fork: https://github.com/djhmateer/auto-archiver
+
+In 2024 we won the ESRC Celebrating Impact Prize for "Research that is helping the UN and courts around the world to assess mobile phone evidence in war crimes prosecutions and other human rights cases"
+https://www.swansea.ac.uk/press-office/news-events/news/2024/11/research-on-using-mobile-phone-evidence-in-human-rights-cases-wins-prestigious-impact-prize.php
+
+Over the last year I've archived over 60,000 urls on 5 VM's running on a Proxmox hypervisor on my own hardware. Investigators are frequently waiting for archiving to finish whereas the other VM's are idle.
+
+In this hackathon I'm building
+
+1) a queuing system - a Postgres database and an overall coordinator service (on a separate VM). Then 5 worker VM's each have a new wrapper which takes work from Postgres and runs the existing archiver tool.
+
+2) distressing image analyser. A problem for human rights investigators is that the imagery/videos can be frequently distressing. Commonly there is a 1-5 rating scale against all images (currently done manually) so others don't have to see the image unless they have to. This is also a problem for me as a developer, where I don't want to mistakenly see an image unless necessary. I wish to be forewarned. I'm experimenting with muse-glimmer:30b-q4_K_M running locally on Ollama with good (albeit slow on my CPU only) results
+
+If anyone else is working or interested (or if I can help you) in digital archiving / monitoring / human rights , or if you'd like to chat, please drop me a line. dave@hmsoftware.co.uk or here on Discord.
+
+Good luck everyone and I hope you're enjoying building.
+
+Big thanks to Meta for this hackathon which has inspired me to start these 2 features.
+
 <h1>This Fork</h1>
 
-<!-- Main branch represents what I (should) have in production. Currently 1.1.6+dm.7. As of 3rd Nov 25 -->
-Main branch represents what I (should) have in production. Currently 1.2.9+dm.8. As of 16th Sept 26
+This repo is a copy of my fork, taken on 31st Oct 26 for the hackathon. It's version 1.2.9 plus the work above, which isn't in production yet.
 
-This is essentially upstream with added:
 
-- Facebook crawling. 
-- Overwriting allowed on spreadsheets cells
-- Updates turned off (as may affect prod - have seen unusual behaviour). 
-- WACZ image sizes to prevent small gifs etc.. 
-- metadata.json hardcoded filename to stay the same so easier to automate further analysis. 
-- Log files hardcoded to logs/1debug.log etc.. as I prefer this.
-- mhtml_enricher module to save an mhtml snapshot of the page.
-- screenshot_enricher/webdriver using Firefox instead of Chrome - Chrome antibot measures were affecting the FB cookie and causing flagging issues. Firefox screenshots have also been very good.
-- screenshot_enricher runs OCR (pytesseract) on every Facebook screenshot to detect if the FB cookie/sock puppet session has been tripped
-- VPN addition for Twitter/X so that adult content is allowed - off by default. 17th Sept 26 found that expressvpn not working to Sydney properly anymore (too many timeouts)
 
 
 <h1 align="center">Auto Archiver</h1>

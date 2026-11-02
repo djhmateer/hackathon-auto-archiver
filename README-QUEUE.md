@@ -14,12 +14,15 @@ AA_DATABASE_URL=postgresql://bob:password@localhost:5432/auto_archiver
 ## Run locally
 
 ```bash
+# checks and applies migrations (connection string read from .env)
 poetry run python -m auto_archiver.job_queue.migrate
+# run the coordinator
 poetry run python -m auto_archiver.job_queue.coordinator
+# run the worker (--slots 1 is default and not required)
 poetry run python -m auto_archiver.job_queue.worker_supervisor --slots 1
 ```
 
-Run the last two in separate terminals. Leave out `--reboot-at` on a desktop, or it reboots the machine.
+Run the last two in separate terminals.
 
 ## Deploy a new coordinator VM
 
