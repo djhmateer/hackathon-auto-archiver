@@ -14,7 +14,7 @@ User=dave
 WorkingDirectory=/home/dave/auto-archiver
 # deno is needed by yt-dlp
 Environment=PATH=/home/dave/.local/bin:/home/dave/.deno/bin:/usr/local/bin:/usr/bin:/bin
-ExecStart=/home/dave/.local/bin/poetry run python -m auto_archiver.job_queue.worker_supervisor --slots 1 --reboot-at 05:20
+ExecStart=/home/dave/.local/bin/poetry run python -m auto_archiver.job_queue.worker_supervisor --reboot-at 05:20
 # only the supervisor gets the stop signal, so jobs can finish
 KillMode=mixed
 TimeoutStopSec=15min

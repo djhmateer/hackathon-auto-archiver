@@ -129,8 +129,9 @@ Postgres:
 - One archiver child process per job, not a long-running worker. It gives clean state, frees memory
   and can be killed with its browsers. Each config loads different modules, and modules share a
   temp folder setting, so one process can't safely run two rows.
-- Account and domain limits are not in phase 1. Dave manages accounts. Slots and sheet weights are
-  the only concurrency controls. Total slots stay at 5 until the queue is stable.
+- Account and domain limits are not in phase 1. Dave manages accounts. The number of VMs and sheet
+  weights are the only concurrency controls. Each VM runs one job at a time. Stay at 5 VMs until the
+  queue is stable.
 - No VPN is used, so the orchestrator's VPN code is not a constraint.
 - Nothing else reads the sheet status, including client scripts and Uwazi.
 - Clients don't sort, insert or delete rows while archiving is pending, but every write still gets a
@@ -154,8 +155,8 @@ a heartbeat row. The supervisor runs on each worker VM.
   worksheet allow and block lists and the folder settings from each sheet's config. It adds new tabs
   that the config allows, as the feeder does today. The rules are a pure function that takes sheet
   rows and database state and returns actions, so they can be tested with no network.
-- **Supervisor**: one per worker VM, with N slots. Each slot claims a job and runs the archiver as a
-  child process. It renews the lease every minute and kills the process tree on the time limit. See
+- **Supervisor**: one per worker VM. It claims one job at a time and runs the archiver as a child
+  process. It renews the lease every minute and kills the process tree on the time limit. See
   "Supervisor rules".
 - **`queue_feeder_db`**: a new module, both Feeder and Database, modelled on `gsheet_feeder_db`. It
   yields the one claimed job and writes results to Postgres, with its own retries, because the
@@ -192,7 +193,7 @@ the row it has just re-read.
 
 - **Time limit**: `ROW_KILL_SECONDS` stays in the child, as it reports the failure. The supervisor's
   limit is 3 h 5 min, as a backstop. A time-limit kill is a final failure and is not retried, because
-  three attempts could hold a slot for 9 hours. Only a lost lease is retried. `ROW_KILL_SECONDS` only
+  three attempts could hold a VM for 9 hours. Only a lost lease is retried. `ROW_KILL_SECONDS` only
   runs when `each_level_in_separate_file` is on, so the supervisor passes
   `--logging.each_level_in_separate_file` and `--logging.file` to every child.
 - **Lease renewal**: renewal matches on `lease_token` only, not on `lease_until`. Kill the job only if
@@ -220,8 +221,8 @@ the row it has just re-read.
 - **Crawls**: killing `docker run` leaves the container crawling. Start it with
   `--name aa-job-<job id>` and run `docker rm -f` on kill. This also fixes `_kill_hung_row`. Also run it
   before starting, as a retry reuses the name.
-- **Temp files**: `AA_SLOT_DIR` is set per slot and holds `logs/` and `tmp/`. `feed_item` creates its
-  temp folder there, so the supervisor can wipe `tmp/` after a kill.
+- **Temp files**: `AA_WORKER_DIR` is set to the repo root, which holds `logs/` and `tmp/`. `feed_item`
+  creates its temp folder there, so the supervisor can wipe `tmp/` after a kill.
 - **Daily reboot and deploys**: the reboot logic is in the cron scripts this replaces, so the
   supervisor takes it over. It stops claiming at `REBOOT_AT`, reboots when idle and forces it an hour
   later. Deploys use the same drain.
@@ -409,8 +410,8 @@ phase 3.
 
 ## Running rows at once
 
-Drive folders can go wrong as soon as jobs overlap, so fix them in phase 1. The rest apply from 2
-slots on one VM, so run 1 slot per VM until they're fixed, and fix them before rollout step 4.
+Drive folders can go wrong as soon as jobs overlap, so fix them in phase 1. The rest only apply
+if one VM runs jobs at once, which it doesn't: each VM runs one job at a time.
 
 | Problem | Where | Fix |
 |---|---|---|
@@ -418,7 +419,7 @@ slots on one VM, so run 1 slot per VM until they're fixed, and fix them before r
 | Shared Chrome profile | The first browser locks `antibot_user_data`, and the fallback retries without the profile | Copy the profile per job |
 | Shared cookie file | yt-dlp writes cookies back to the file on exit, so runs can overwrite each other | Copy cookies per job |
 | OAuth token refresh | The token file is truncated then rewritten with no lock (`gdrive_storage.py:111`) | File lock, or a service account |
-| Facebook crawl's shared files | `_fb_browsertrix_crawl` writes `url.txt` to the working directory and copies the profile to `~/aatmp` | A folder per slot |
+| Facebook crawl's shared files | `_fb_browsertrix_crawl` writes `url.txt` to the working directory and copies the profile to `~/aatmp` | A folder per job |
 
 ## Known problems
 
@@ -428,8 +429,7 @@ slots on one VM, so run 1 slot per VM until they're fixed, and fix them before r
    sheet links to the latest attempt, so these are harmless orphans. This assumes production doesn't
    use `random_no_duplicate`, which skips identical files. See "Questions for Dave".
 2. **Shared logs**: `logs/1debug.log`, the other log files and `logs/hangs.log` have hard-coded paths.
-   Use `logs/` under `AA_SLOT_DIR`, see "Supervisor rules". `aa-logs` must then read each slot's logs,
-   and the `STARTED` and `DONE` lines must stay, because the timings use them.
+   Each VM runs one job at a time, so they aren't shared and stay in `logs/`. The `STARTED` and `DONE` lines must stay, because the timings use them.
 3. **Postgres driver**: decided, see Decisions. `psycopg` is in `pyproject.toml`.
 4. **Timeouts**: decided, see "Supervisor rules".
 5. **"Archive in progress" relabelling**: `gsheet_feeder_db.py:92` assumes one server per worksheet. It
@@ -457,12 +457,11 @@ slots on one VM, so run 1 slot per VM until they're fixed, and fix them before r
    cycle. A row cron picks up between two cycles is never seen, so short waits are undercounted.
 2. **Small sheet**: move one small spreadsheet, with all its tabs, because a cron config covers a whole
    spreadsheet. `sheets.enabled` is the switch for whether cron or the queue owns a sheet. Never both.
-3. **Busy sheets**: move larger ones in turn, keeping total slots at 5 until stable.
-4. **Scale up**: first fix the problems in "Running rows at once". Then raise slots gradually (2, 3, 4,
-   6, 8 per host) on live work, watching disk latency, account errors and Drive
+3. **Busy sheets**: move larger ones in turn, keeping to 5 VMs until stable.
+4. **Scale up**: add worker VMs gradually on live work, watching disk latency, account errors and Drive
    `userRateLimitExceeded` warnings. Stop when time per domain or those warnings rise, or memory or
    disk runs short. This gives the first real capacity figure. Phase 1 adds no
-   capacity until this step: at 5 slots the simulation gives a 3.9 h 95th percentile at 3x, so do it
+   capacity until this step: at 5 VMs the simulation gives a 3.9 h 95th percentile at 3x, so do it
    before volume triples.
 
 **Moving a spreadsheet** (`python -m auto_archiver.job_queue.sync ...`):

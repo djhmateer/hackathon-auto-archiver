@@ -439,8 +439,7 @@ Here's how that would look: \n\nsteps:\n  extractors:\n  - [your_extractor_name_
                 #     )
                 # DM 25th Jun - I prefer this as am used to it, and it gives colour coded logs
                 # also my cron job looks at the output of 1debug.log which is critical (todo - maybe not so critical anymore)
-                # the queue's supervisor sets AA_SLOT_DIR, so slots on one VM don't share log files. Otherwise ./logs
-                log_dir = os.path.join(os.environ.get("AA_SLOT_DIR", ""), "logs")
+                log_dir = "logs"
                 os.makedirs(log_dir, exist_ok=True)
                 logger.add(os.path.join(log_dir, "1debug.log"), level="DEBUG", rotation=rotation)
 
@@ -814,10 +813,10 @@ Here's how that would look: \n\nsteps:\n  extractors:\n  - [your_extractor_name_
         """
         tmp_dir: TemporaryDirectory = None
         try:
-            # the queue's supervisor sets AA_SLOT_DIR, so it can wipe a killed job's files
+            # the queue's supervisor sets AA_WORKER_DIR, so it can wipe a killed job's files
             tmp_parent = "./"
-            if slot_dir := os.environ.get("AA_SLOT_DIR"):
-                tmp_parent = os.path.join(slot_dir, "tmp")
+            if worker_dir := os.environ.get("AA_WORKER_DIR"):
+                tmp_parent = os.path.join(worker_dir, "tmp")
                 os.makedirs(tmp_parent, exist_ok=True)
             tmp_dir = TemporaryDirectory(dir=tmp_parent)
             # set tmp_dir on all modules

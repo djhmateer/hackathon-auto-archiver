@@ -1,10 +1,10 @@
 """
-Supervisor: one per worker VM. Each slot claims a job and runs the archiver as a child process. See queue-spec.md
+Supervisor: one per worker VM. It claims one job at a time and runs the archiver as a child process. See queue-spec.md
 
-One thread checks every slot in turn every few seconds. Nothing here needs Postgres to keep a job running: if it's
-unreachable, jobs carry on and their results wait for it to come back.
+It checks the job every few seconds. Nothing here needs Postgres to keep a job running: if it's unreachable, the job
+carries on and its result waits for it to come back.
 
-    python -m auto_archiver.job_queue.worker_supervisor --slots 1 [--reboot-at 05:20]
+    python -m auto_archiver.job_queue.worker_supervisor [--reboot-at 05:20]
 """
 
 import argparse
@@ -37,7 +37,7 @@ ARCHIVER_PATH = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 
 
 def run_docker(*args: str) -> str:
-    """Docker's output, or "" if it isn't installed or fails, as most slots won't have anything to remove"""
+    """Docker's output, or "" if it isn't installed or fails, as there's often nothing to remove"""
     try:
         return subprocess.run(["docker", *args], capture_output=True, text=True, timeout=60).stdout
     except (OSError, subprocess.SubprocessError) as e:
@@ -45,12 +45,12 @@ def run_docker(*args: str) -> str:
         return ""
 
 
-def slot_pids(slot_dir: str) -> list[int]:
+def child_pids(worker_dir: str) -> list[int]:
     """
-    Every process started for this slot, found by the AA_SLOT_DIR they inherit. Browsers can leave their process group,
+    Every process started for a job, found by the AA_WORKER_DIR they inherit. Browsers can leave their process group,
     and a child that outlived the supervisor has no parent to follow, but they all keep this
     """
-    marker = f"AA_SLOT_DIR={slot_dir}".encode()
+    marker = f"AA_WORKER_DIR={worker_dir}".encode()
     pids = []
     for environ in glob.glob("/proc/[0-9]*/environ"):
         try:
@@ -62,8 +62,8 @@ def slot_pids(slot_dir: str) -> list[int]:
     return pids
 
 
-def kill_slot(slot_dir: str) -> None:
-    for pid in slot_pids(slot_dir):
+def kill_children(worker_dir: str) -> None:
+    for pid in child_pids(worker_dir):
         try:
             os.kill(pid, signal.SIGKILL)
         except OSError:
@@ -75,7 +75,7 @@ def _die_with_parent() -> None:
     ctypes.CDLL(None).prctl(1, signal.SIGKILL)  # 1 is PR_SET_PDEATHSIG
 
 
-def start_child(job: dict, slot_dir: str, extra_args: tuple = ()) -> subprocess.Popen:
+def start_child(job: dict, worker_dir: str, extra_args: tuple = ()) -> subprocess.Popen:
     args = [
         sys.executable,
         ARCHIVER_PATH,
@@ -88,14 +88,15 @@ def start_child(job: dict, slot_dir: str, extra_args: tuple = ()) -> subprocess.
         f"--queue_feeder_db.job_id={job['id']}",
         f"--queue_feeder_db.lease_token={job['lease_token']}",
         # the child's own hang dump and kill timer only run with these. The orchestrator requires a file but doesn't
-        # use it: it writes 1debug.log and the others to AA_SLOT_DIR/logs
+        # use it: it writes 1debug.log and the others to logs/
         "--logging.each_level_in_separate_file=true",
-        f"--logging.file={os.path.join(slot_dir, 'logs', 'archiver.log')}",
+        f"--logging.file={os.path.join(worker_dir, 'logs', 'archiver.log')}",
         *extra_args,
     ]
-    env = {**os.environ, "AA_SLOT_DIR": slot_dir, "AA_JOB_ID": str(job["id"])}
+    env = {**os.environ, "AA_WORKER_DIR": worker_dir, "AA_JOB_ID": str(job["id"])}
     # only the last job's, for setup errors which happen before the logs are set up
-    with open(os.path.join(slot_dir, "child.out"), "w") as output:
+    os.makedirs(os.path.join(worker_dir, "logs"), exist_ok=True)
+    with open(os.path.join(worker_dir, "logs", "child.out"), "w") as output:
         return subprocess.Popen(
             args, env=env, stdout=output, stderr=subprocess.STDOUT, preexec_fn=_die_with_parent, start_new_session=True
         )
@@ -118,13 +119,11 @@ def describe_job(job: dict) -> str:
 
 
 @dataclass
-class Slot:
-    number: int
-    dir: str
-    job: dict = None
-    process: object = None
-    started: float = 0
-    renewed: float = 0
+class RunningJob:
+    job: dict
+    process: object
+    started: float
+    renewed: float
     kill_reason: str = None  # the supervisor killed it for this, so it's a final failure
     stolen: bool = False  # another worker has the job, so its state isn't ours to touch
 
@@ -133,18 +132,17 @@ class WorkerSupervisor:
     def __init__(
         self,
         worker: str,
-        slots: int = 1,
-        base_dir: str = "slots",
         reboot_at: str = None,
         start=start_child,
-        kill=kill_slot,
+        kill=kill_children,
         reboot=reboot_machine,
         get_boot_time=boot_time,
         clock=time.monotonic,
         wall_clock=lambda: datetime.now(timezone.utc),
     ):
         self.worker = worker
-        self.slots = [Slot(n, os.path.abspath(os.path.join(base_dir, str(n)))) for n in range(1, slots + 1)]
+        self.dir = os.getcwd()
+        self.running = None
         self.reboot_at = reboot_at
         self.start = start
         self.kill = kill
@@ -159,36 +157,34 @@ class WorkerSupervisor:
         self.quick_failures = []  # the sheet of each quick failure in a row
 
     def clear_leftovers(self) -> None:
-        """At startup: children and crawls from a supervisor that died. Their jobs come back when the leases expire"""
-        for slot in self.slots:
-            os.makedirs(slot.dir, exist_ok=True)
-            self.kill(slot.dir)
-            shutil.rmtree(os.path.join(slot.dir, "tmp"), ignore_errors=True)
+        """At startup: a child and crawls from a supervisor that died. Its job comes back when the lease expires"""
+        self.kill(self.dir)
+        shutil.rmtree(os.path.join(self.dir, "tmp"), ignore_errors=True)
         for container in run_docker("ps", "-aq", "--filter", "name=^aa-job-").split():
             run_docker("rm", "-f", container)
 
     def is_idle(self) -> bool:
-        return all(slot.process is None for slot in self.slots)
+        return self.running is None
 
-    def _kill_child(self, slot: Slot) -> None:
-        slot.process.kill()
-        self.kill(slot.dir)
-        run_docker("rm", "-f", f"aa-job-{slot.job['id']}")
+    def _kill_child(self) -> None:
+        self.running.process.kill()
+        self.kill(self.dir)
+        run_docker("rm", "-f", f"aa-job-{self.running.job['id']}")
 
     def check_time_limits(self) -> None:
         """
         Needs no Postgres, so the limit holds during an outage. The job's failure is saved once the child's gone. If
         cleanup requeues it first, after a long outage, it gets one more attempt instead of failing. That's acceptable
         """
-        for slot in self.slots:
-            if (
-                slot.process is not None
-                and slot.kill_reason is None
-                and self.clock() - slot.started > TIME_LIMIT_SECONDS
-            ):
-                logger.error(f"Job {slot.job['id']} hit the time limit, killing it")
-                slot.kill_reason = f"- still running after {TIME_LIMIT_SECONDS // 60} minutes, killed"
-                self._kill_child(slot)
+        running = self.running
+        if (
+            running is not None
+            and running.kill_reason is None
+            and self.clock() - running.started > TIME_LIMIT_SECONDS
+        ):
+            logger.error(f"Job {running.job['id']} hit the time limit, killing it")
+            running.kill_reason = f"- still running after {TIME_LIMIT_SECONDS // 60} minutes, killed"
+            self._kill_child()
 
     def _record_quick_failure(self, sheet_id: int, conn) -> None:
         """
@@ -207,23 +203,24 @@ class WorkerSupervisor:
                 db.add_alert(conn, "worker_paused", f"Worker {self.worker} paused after repeated quick failures")
                 self.pause_alerted = True
 
-    def _child_exited(self, conn, slot: Slot) -> None:
+    def _child_exited(self, conn) -> None:
         """Works out what happened and saves it. If Postgres fails, the next tick does this again"""
-        job, ran_for = slot.job, self.clock() - slot.started
-        current = None if slot.stolen else db.get_job(conn, job["id"])
+        running = self.running
+        job, ran_for = running.job, self.clock() - running.started
+        current = None if running.stolen else db.get_job(conn, job["id"])
         ours = current is not None and current["lease_token"] == job["lease_token"]
 
-        if slot.stolen or not ours:
+        if running.stolen or not ours:
             logger.warning(f"Job {job['id']} now belongs to another worker, leaving it alone")
         elif current["status"] == "done":
             self.quick_failures, self.pause_alerted = [], False
         elif current["status"] == "failed":
             self._record_failure(conn, job, ran_for)
-        elif slot.kill_reason:
-            self._fail(conn, job, slot.kill_reason)
+        elif running.kill_reason:
+            self._fail(conn, job, running.kill_reason)
             self.quick_failures = []
         elif current["work_started_at"] is None:
-            logger.error(f"Job {job['id']} exited during setup, see {slot.dir}/child.out")
+            logger.error(f"Job {job['id']} exited during setup, see {self.dir}/logs/child.out")
             db.release_setup_failure(conn, job["id"], job["lease_token"])
             self._record_quick_failure(job["sheet_id"], conn)
         else:
@@ -231,11 +228,10 @@ class WorkerSupervisor:
             self._fail(conn, job, "- the archiver stopped unexpectedly - please rerun")
             self._record_failure(conn, job, ran_for)
 
-        self.kill(slot.dir)
+        self.kill(self.dir)
         run_docker("rm", "-f", f"aa-job-{job['id']}")
-        shutil.rmtree(os.path.join(slot.dir, "tmp"), ignore_errors=True)
-        slot.job = slot.process = slot.kill_reason = None
-        slot.stolen = False
+        shutil.rmtree(os.path.join(self.dir, "tmp"), ignore_errors=True)
+        self.running = None
 
     def _record_failure(self, conn, job: dict, ran_for: float) -> None:
         if ran_for < QUICK_FAILURE_SECONDS:
@@ -247,18 +243,19 @@ class WorkerSupervisor:
         cells = {"status": f"Archive failed {reason}", "date": datetime.now(timezone.utc).isoformat()}
         db.finish_job(conn, job["id"], job["lease_token"], "failed", cells, reason)
 
-    def _check_slot(self, conn, slot: Slot) -> None:
-        if slot.process.poll() is not None:
-            self._child_exited(conn, slot)
-        elif not slot.kill_reason and self.clock() - slot.renewed >= RENEW_SECONDS:
+    def _check_running(self, conn) -> None:
+        running = self.running
+        if running.process.poll() is not None:
+            self._child_exited(conn)
+        elif not running.kill_reason and self.clock() - running.renewed >= RENEW_SECONDS:
             # a connection error raises and leaves the job running: only a changed token means it's been taken
-            if db.renew_lease(conn, slot.job["id"], slot.job["lease_token"]):
-                slot.renewed = self.clock()
+            if db.renew_lease(conn, running.job["id"], running.job["lease_token"]):
+                running.renewed = self.clock()
             else:
-                logger.warning(f"Job {slot.job['id']} was taken by another worker, killing the child")
-                slot.stolen = True
-                slot.kill_reason = "taken by another worker"
-                self._kill_child(slot)
+                logger.warning(f"Job {running.job['id']} was taken by another worker, killing the child")
+                running.stolen = True
+                running.kill_reason = "taken by another worker"
+                self._kill_child()
 
     def _reboot_due(self) -> tuple[bool, bool]:
         """(due, forced), as the cron scripts did: the first idle moment after reboot_at, at most once a day"""
@@ -285,39 +282,33 @@ class WorkerSupervisor:
                 return False
         return True
 
-    def _claim(self, conn, slot: Slot) -> bool:
+    def _claim(self, conn) -> None:
         job = db.claim_job(conn, self.worker)
         if job is None:
-            return False
-        os.makedirs(slot.dir, exist_ok=True)
+            return
         run_docker("rm", "-f", f"aa-job-{job['id']}")  # a retry reuses the name
         try:
-            slot.process = self.start(job, slot.dir)
+            process = self.start(job, self.dir)
         except Exception:
             # nothing is running it, so don't leave it waiting for its lease to expire
             db.release_setup_failure(conn, job["id"], job["lease_token"])
             raise
-        slot.job = job
-        slot.started = slot.renewed = self.clock()
-        logger.info(f"Slot {slot.number} started {describe_job(job)}")
-        return True
+        self.running = RunningJob(job, process, self.clock(), self.clock())
+        logger.info(f"Started {describe_job(job)}")
 
     def tick(self, conn) -> None:
-        for slot in self.slots:
-            if slot.process is not None:
-                self._check_slot(conn, slot)
+        if self.running is not None:
+            self._check_running(conn)
         rebooting = self._reboot_if_due(conn)
         if self.draining or rebooting or self.clock() < self.paused_until:
             return
-        for slot in self.slots:
-            if slot.process is None and not self._claim(conn, slot):
-                break
+        if self.running is None:
+            self._claim(conn)
 
     def log_draining(self) -> None:
-        logger.info("Finishing the running jobs, then stopping")
-        for slot in self.slots:
-            if slot.process is not None:
-                logger.info(f"Slot {slot.number} is finishing {describe_job(slot.job)}")
+        logger.info("Finishing the running job, then stopping")
+        if self.running is not None:
+            logger.info(f"Finishing {describe_job(self.running.job)}")
 
     def run(self) -> None:
         self.clear_leftovers()
@@ -353,13 +344,12 @@ def reboot_time(value: str) -> str:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Runs archiver jobs from the job queue")
-    parser.add_argument("--slots", type=int, default=1, help="how many jobs to run at once")
     parser.add_argument("--worker", default=socket.gethostname(), help="this VM's name")
     parser.add_argument(
         "--reboot-at", type=reboot_time, help="UK time for the daily reboot, eg 05:20. No reboots if left out"
     )
     args = parser.parse_args()
-    WorkerSupervisor(args.worker, args.slots, reboot_at=args.reboot_at).run()
+    WorkerSupervisor(args.worker, reboot_at=args.reboot_at).run()
 
 
 if __name__ == "__main__":

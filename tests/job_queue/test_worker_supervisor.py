@@ -52,14 +52,13 @@ def children():
 
 @pytest.fixture
 def make_supervisor(tmp_path, clock, children, mocker):
-    def start(job, slot_dir):
+    def start(job, worker_dir):
         children.append(FakeProcess())
         return children[-1]
 
     def make(**kwargs):
         options = {
             "worker": "vm1",
-            "base_dir": str(tmp_path),
             "start": start,
             "kill": mocker.MagicMock(),
             "clock": clock,
@@ -102,25 +101,25 @@ def alert_kinds(conn) -> list[str]:
 # claiming and renewing
 
 
-def test_idle_slots_claim_and_start_a_child(conn, make_supervisor, children):
+def test_idle_supervisor_claims_and_starts_a_child(conn, make_supervisor, children):
     job_id = add_job(conn, add_sheet(conn))
     sup = make_supervisor()
     sup.tick(conn)
     assert len(children) == 1
-    assert sup.slots[0].job["id"] == job_id
+    assert sup.running.job["id"] == job_id
     assert job(conn, job_id)["status"] == "running"
     assert job(conn, job_id)["worker"] == "vm1"
 
 
-def test_each_slot_takes_one_job_and_the_rest_wait(conn, make_supervisor, children):
+def test_one_job_runs_at_a_time_and_the_rest_wait(conn, make_supervisor, children):
     sheet = add_sheet(conn)
     for row in range(2, 5):
         add_job(conn, sheet, row)
-    sup = make_supervisor(slots=2)
+    sup = make_supervisor()
     sup.tick(conn)
     sup.tick(conn)
-    assert len(children) == 2
-    assert conn.execute("SELECT count(*) AS n FROM jobs WHERE status = 'queued'").fetchone()["n"] == 1
+    assert len(children) == 1
+    assert conn.execute("SELECT count(*) AS n FROM jobs WHERE status = 'queued'").fetchone()["n"] == 2
 
 
 def test_lease_is_renewed_every_minute(conn, make_supervisor, clock):
@@ -147,7 +146,7 @@ def test_connection_error_on_renewal_keeps_the_child_running(conn, make_supervis
     with pytest.raises(OSError):
         sup.tick(conn)
     assert children[0].killed is False
-    assert sup.slots[0].process is children[0]
+    assert sup.running.process is children[0]
 
 
 def test_stolen_lease_kills_the_child_and_changes_nothing(conn, make_supervisor, clock, children):
@@ -164,23 +163,23 @@ def test_stolen_lease_kills_the_child_and_changes_nothing(conn, make_supervisor,
 
     current = job(conn, job_id)
     assert (current["status"], current["worker"], current["lease_token"]) == ("running", "vm2", new_token)
-    assert sup.slots[0].process is None
+    assert sup.running is None
 
 
 # exits
 
 
-def test_clean_finish_frees_the_slot_for_the_next_job(conn, make_supervisor, children):
+def test_clean_finish_lets_it_claim_the_next_job(conn, make_supervisor, children):
     sheet = add_sheet(conn)
     first = add_job(conn, sheet, 2)
     second = add_job(conn, sheet, 3)
     sup = make_supervisor()
     sup.tick(conn)
-    token = sup.slots[0].job["lease_token"]
+    token = sup.running.job["lease_token"]
     db.finish_job(conn, first, token, "done", {"status": "ok"})
     children[0].exit_code = 0
     sup.tick(conn)
-    assert sup.slots[0].job["id"] == second
+    assert sup.running.job["id"] == second
     assert job(conn, first)["status"] == "done"
 
 
@@ -199,7 +198,7 @@ def test_exit_after_work_started_is_a_final_failure(conn, make_supervisor, child
     job_id = add_job(conn, add_sheet(conn))
     sup = make_supervisor()
     sup.tick(conn)
-    db.mark_work_started(conn, job_id, sup.slots[0].job["lease_token"])
+    db.mark_work_started(conn, job_id, sup.running.job["lease_token"])
     children[0].exit_code = -9
     sup.tick(conn)
     assert job(conn, job_id)["status"] == "failed"
@@ -210,7 +209,7 @@ def test_child_that_reported_its_own_failure_is_left_as_it_is(conn, make_supervi
     job_id = add_job(conn, add_sheet(conn))
     sup = make_supervisor()
     sup.tick(conn)
-    token = sup.slots[0].job["lease_token"]
+    token = sup.running.job["lease_token"]
     db.mark_work_started(conn, job_id, token)
     db.finish_job(conn, job_id, token, "failed", {"status": "Archive failed its own reason"}, "its own reason")
     children[0].exit_code = 1
@@ -233,13 +232,13 @@ def test_postgres_failing_during_an_exit_is_tried_again(conn, make_supervisor, c
     job_id = add_job(conn, add_sheet(conn))
     sup = make_supervisor()
     sup.tick(conn)
-    db.mark_work_started(conn, job_id, sup.slots[0].job["lease_token"])
+    db.mark_work_started(conn, job_id, sup.running.job["lease_token"])
     children[0].exit_code = 1
 
     get_job = mocker.patch("auto_archiver.job_queue.db.get_job", side_effect=OSError("Postgres has gone"))
     with pytest.raises(OSError):
         sup.tick(conn)
-    assert sup.slots[0].job is not None, "still remembers the job"
+    assert sup.running is not None, "still remembers the job"
 
     mocker.stop(get_job)
     sup.tick(conn)
@@ -250,14 +249,14 @@ def test_files_and_processes_are_cleaned_after_an_exit(conn, make_supervisor, ch
     job_id = add_job(conn, add_sheet(conn))
     sup = make_supervisor()
     sup.tick(conn)
-    slot_dir = sup.slots[0].dir
-    os.makedirs(os.path.join(slot_dir, "tmp", "leftover"))
-    os.makedirs(os.path.join(slot_dir, "logs"))
+    worker_dir = sup.dir
+    os.makedirs(os.path.join(worker_dir, "tmp", "leftover"))
+    os.makedirs(os.path.join(worker_dir, "logs"))
     children[0].exit_code = 1
     sup.tick(conn)
-    assert not os.path.exists(os.path.join(slot_dir, "tmp"))
-    assert os.path.exists(os.path.join(slot_dir, "logs")), "logs are kept"
-    sup.kill.assert_called_with(slot_dir)
+    assert not os.path.exists(os.path.join(worker_dir, "tmp"))
+    assert os.path.exists(os.path.join(worker_dir, "logs")), "logs are kept"
+    sup.kill.assert_called_with(worker_dir)
     no_docker.assert_any_call("rm", "-f", f"aa-job-{job_id}")
 
 
@@ -277,7 +276,7 @@ def test_old_container_is_removed_before_a_retry_starts(conn, make_supervisor, n
 def test_child_that_cannot_start_gives_the_job_back(conn, make_supervisor):
     job_id = add_job(conn, add_sheet(conn))
 
-    def start(job, slot_dir):
+    def start(job, worker_dir):
         raise OSError("can't start")
 
     sup = make_supervisor(start=start)
@@ -285,7 +284,7 @@ def test_child_that_cannot_start_gives_the_job_back(conn, make_supervisor):
         sup.tick(conn)
     current = job(conn, job_id)
     assert (current["status"], current["attempts"], current["lease_token"]) == ("queued", 0, None)
-    assert sup.slots[0].job is None and sup.is_idle()
+    assert sup.running is None and sup.is_idle()
 
 
 def test_bad_reboot_time_stops_at_startup(monkeypatch):
@@ -305,7 +304,7 @@ def test_time_limit_kills_and_is_a_final_failure_with_no_retry(conn, make_superv
     job_id = add_job(conn, add_sheet(conn))
     sup = make_supervisor()
     sup.tick(conn)
-    db.mark_work_started(conn, job_id, sup.slots[0].job["lease_token"])
+    db.mark_work_started(conn, job_id, sup.running.job["lease_token"])
 
     clock.now += worker_supervisor.TIME_LIMIT_SECONDS - 1
     sup.check_time_limits()
@@ -326,7 +325,7 @@ def test_time_limit_works_while_postgres_is_down_and_saves_when_it_returns(conn,
     job_id = add_job(conn, add_sheet(conn))
     sup = make_supervisor()
     sup.tick(conn)
-    db.mark_work_started(conn, job_id, sup.slots[0].job["lease_token"])
+    db.mark_work_started(conn, job_id, sup.running.job["lease_token"])
     clock.now += worker_supervisor.TIME_LIMIT_SECONDS + 1
     sup.check_time_limits()  # no connection needed
     assert children[0].killed is True
@@ -392,7 +391,7 @@ def test_one_sheets_failures_pause_the_sheet_not_the_worker(conn, make_superviso
     other_job = add_job(conn, other, 2)
     add_job(conn, sheet, 5)
     sup.tick(conn)
-    assert sup.slots[0].job["id"] == other_job, "the worker carries on with other sheets"
+    assert sup.running.job["id"] == other_job, "the worker carries on with other sheets"
 
 
 def test_a_row_failing_slowly_is_not_a_quick_failure(conn, make_supervisor, clock, children):
@@ -401,7 +400,7 @@ def test_a_row_failing_slowly_is_not_a_quick_failure(conn, make_supervisor, cloc
     for number, sheet in enumerate(sheets):
         job_id = add_job(conn, sheet, number + 2)
         sup.tick(conn)
-        db.mark_work_started(conn, job_id, sup.slots[0].job["lease_token"])
+        db.mark_work_started(conn, job_id, sup.running.job["lease_token"])
         clock.now += worker_supervisor.QUICK_FAILURE_SECONDS + 1
         children[-1].exit_code = 1
         sup.tick(conn)
@@ -414,7 +413,7 @@ def test_rows_failing_quickly_after_setup_count(conn, make_supervisor, children)
     for number, sheet in enumerate(sheets):
         job_id = add_job(conn, sheet, number + 2)
         sup.tick(conn)
-        db.mark_work_started(conn, job_id, sup.slots[0].job["lease_token"])
+        db.mark_work_started(conn, job_id, sup.running.job["lease_token"])
         children[-1].exit_code = 1
         sup.tick(conn)
     assert sup.paused_until > 0
@@ -429,7 +428,7 @@ def test_a_finished_job_clears_the_failures_and_the_alert(conn, make_supervisor,
 
     job_id = add_job(conn, sheets[0], 3)
     sup.tick(conn)
-    db.finish_job(conn, job_id, sup.slots[0].job["lease_token"], "done", {"status": "ok"})
+    db.finish_job(conn, job_id, sup.running.job["lease_token"], "done", {"status": "ok"})
     children[-1].exit_code = 0
     sup.tick(conn)
 
@@ -449,7 +448,7 @@ def test_draining_lets_jobs_finish_and_claims_nothing_new(conn, make_supervisor,
     sup.draining = True
     sup.tick(conn)
     assert children[0].killed is False
-    db.finish_job(conn, first, sup.slots[0].job["lease_token"], "done", {"status": "ok"})
+    db.finish_job(conn, first, sup.running.job["lease_token"], "done", {"status": "ok"})
     children[0].exit_code = 0
     sup.tick(conn)
     assert len(children) == 1
@@ -460,12 +459,11 @@ def test_draining_logs_each_running_job(conn, make_supervisor, caplog):
     sheet = add_sheet(conn)
     job_id = db.add_job(conn, sheet, 7, "https://example.com/post/7", "example.com", "folder1")
     conn.execute("UPDATE jobs SET available_at = now() - interval '1 minute'")
-    sup = make_supervisor(slots=2)
+    sup = make_supervisor()
     sup.tick(conn)
     caplog.clear()
     sup.log_draining()
-    assert f"Slot 1 is finishing job {job_id} row 7 folder 'folder1' https://example.com/post/7" in caplog.text
-    assert "Slot 2" not in caplog.text
+    assert f"Finishing job {job_id} row 7 folder 'folder1' https://example.com/post/7" in caplog.text
 
 
 UK_MORNING = datetime(2026, 11, 2, 5, 30, tzinfo=timezone.utc)  # 05:30 in the UK in winter
@@ -517,7 +515,7 @@ def test_reboot_waits_for_running_jobs_and_claims_nothing_new(conn, make_supervi
     plain = make_supervisor()
     plain.tick(conn)
     sup, reboot = rebooting_supervisor(make_supervisor, mocker)
-    sup.slots[0] = plain.slots[0]
+    sup.running = plain.running
     add_job(conn, sheet, 3)
     sup.tick(conn)
     reboot.assert_not_called()
@@ -530,7 +528,7 @@ def test_reboot_is_forced_an_hour_later(conn, make_supervisor, mocker):
     plain.tick(conn)
     later = UK_MORNING + timedelta(minutes=55)
     sup, reboot = rebooting_supervisor(make_supervisor, mocker, now=later)
-    sup.slots[0] = plain.slots[0]
+    sup.running = plain.running
     sup.tick(conn)
     reboot.assert_called_once()
 
@@ -548,7 +546,7 @@ def test_failed_reboot_alerts_once_and_carries_on_archiving(conn, make_superviso
 # real processes
 
 
-def test_kill_slot_kills_a_child_and_its_grandchild_but_not_other_slots(tmp_path):
+def test_kill_children_kills_a_child_and_its_grandchild_but_not_others(tmp_path):
     grandchild_pid_file = tmp_path / "grandchild.pid"
     script = (
         "import subprocess, sys, time\n"
@@ -556,10 +554,10 @@ def test_kill_slot_kills_a_child_and_its_grandchild_but_not_other_slots(tmp_path
         f"open({str(grandchild_pid_file)!r}, 'w').write(str(p.pid))\n"
         "time.sleep(60)\n"
     )
-    slot_dir, other_dir = str(tmp_path / "1"), str(tmp_path / "2")
-    child = subprocess.Popen([sys.executable, "-c", script], env={**os.environ, "AA_SLOT_DIR": slot_dir})
+    worker_dir, other_dir = str(tmp_path / "1"), str(tmp_path / "2")
+    child = subprocess.Popen([sys.executable, "-c", script], env={**os.environ, "AA_WORKER_DIR": worker_dir})
     other = subprocess.Popen(
-        [sys.executable, "-c", "import time; time.sleep(60)"], env={**os.environ, "AA_SLOT_DIR": other_dir}
+        [sys.executable, "-c", "import time; time.sleep(60)"], env={**os.environ, "AA_WORKER_DIR": other_dir}
     )
     grandchild_pid = None
     try:
@@ -569,15 +567,15 @@ def test_kill_slot_kills_a_child_and_its_grandchild_but_not_other_slots(tmp_path
             time.sleep(0.05)
         grandchild_pid = int(grandchild_pid_file.read_text())
 
-        worker_supervisor.kill_slot(slot_dir)
+        worker_supervisor.kill_children(worker_dir)
 
         assert child.wait(timeout=5) == -signal.SIGKILL
         for _ in range(100):
-            if grandchild_pid not in worker_supervisor.slot_pids(slot_dir):
+            if grandchild_pid not in worker_supervisor.child_pids(worker_dir):
                 break
             time.sleep(0.05)
-        assert worker_supervisor.slot_pids(slot_dir) == []
-        assert other.poll() is None, "another slot's job is untouched"
+        assert worker_supervisor.child_pids(worker_dir) == []
+        assert other.poll() is None, "another folder's job is untouched"
     finally:
         other.kill()
         child.kill()

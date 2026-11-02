@@ -195,8 +195,8 @@ def run_for_real(conn, tmp_path, monkeypatch, database_url):
         (CONFIG,),
     ).fetchone()["id"]
 
-    def start(job, slot_dir):
-        return start_child(job, slot_dir, ("--module_paths", str(tmp_path / "test_modules")))
+    def start(job, worker_dir):
+        return start_child(job, worker_dir, ("--module_paths", str(tmp_path / "test_modules")))
 
     def run(urls, config=None):
         if config:
@@ -205,7 +205,7 @@ def run_for_real(conn, tmp_path, monkeypatch, database_url):
         for number, url in enumerate(urls):
             job_ids.append(db.add_job(conn, sheet, number + 2, url, "example.com", "a-folder"))
         conn.execute("UPDATE jobs SET available_at = now() - interval '1 minute'")
-        sup = WorkerSupervisor("vm1", 1, base_dir=str(tmp_path / "slots"), start=start)
+        sup = WorkerSupervisor("vm1", start=start)
         sup.clear_leftovers()
         deadline = time.monotonic() + 180
         while time.monotonic() < deadline:
@@ -216,10 +216,9 @@ def run_for_real(conn, tmp_path, monkeypatch, database_url):
             if waiting == 0 and sup.is_idle():
                 return sup, job_ids
             time.sleep(0.2)
-        for slot in sup.slots:
-            if slot.process:
-                slot.process.kill()
-        output = (tmp_path / "slots" / "1" / "child.out").read_text()[-3000:]
+        if sup.running:
+            sup.running.process.kill()
+        output = (tmp_path / "logs" / "child.out").read_text()[-3000:]
         pytest.fail(f"The jobs didn't finish. The child's output:\n{output}")
 
     return run
@@ -229,25 +228,24 @@ def test_real_child_archives_a_job_end_to_end(conn, run_for_real, tmp_path):
     sup, (job_id,) = run_for_real(["https://example.com/post/1"])
 
     current = db.get_job(conn, job_id)
-    assert current["status"] == "done", (tmp_path / "slots" / "1" / "child.out").read_text()[-3000:]
+    assert current["status"] == "done", (tmp_path / "logs" / "child.out").read_text()[-3000:]
     assert current["work_started_at"] is not None
     cells = conn.execute("SELECT cells FROM outbox ORDER BY id DESC LIMIT 1").fetchone()["cells"]
     assert cells["status"] == "fake_extractor: success"
     assert cells["title"] == "A fake title"
 
-    # logs in the slot's folder, with the lines the timings use
-    debug_log = (tmp_path / "slots" / "1" / "logs" / "1debug.log").read_text()
+    # logs in logs/, with the lines the timings use
+    debug_log = (tmp_path / "logs" / "1debug.log").read_text()
     assert "STARTED" in debug_log
     assert "DONE https://example.com/post/1" in debug_log
-    assert (tmp_path / "slots" / "1" / "logs" / "hangs.log").exists()
-    assert not (tmp_path / "logs").exists(), "nothing in the shared folder"
+    assert (tmp_path / "logs" / "hangs.log").exists()
 
-    # the job's folder reached the child, and files were worked on under the slot's temp folder
+    # the job's folder reached the child, and files were worked on under the temp folder
     stored = list((tmp_path / "stored").rglob("*.txt"))
     assert len(stored) == 1
-    assert str(tmp_path / "slots" / "1" / "tmp") in stored[0].read_text()
+    assert str(tmp_path / "tmp") in stored[0].read_text()
     assert "for folder a-folder" in stored[0].read_text()
-    assert not (tmp_path / "slots" / "1" / "tmp").exists(), "wiped afterwards"
+    assert not (tmp_path / "tmp").exists(), "wiped afterwards"
 
 
 def test_real_child_with_a_failing_row_reports_it(conn, run_for_real):
@@ -264,7 +262,7 @@ def test_real_child_with_a_bad_config_is_a_setup_failure(conn, run_for_real, tmp
     current = db.get_job(conn, job_id)
     assert (current["status"], current["attempts"], current["work_started_at"]) == ("queued", 0, None)
     assert conn.execute("SELECT setup_failures FROM sheets").fetchone()["setup_failures"] == 1
-    assert (tmp_path / "slots" / "1" / "child.out").read_text() != ""
+    assert (tmp_path / "logs" / "child.out").read_text() != ""
 
 
 def test_real_child_killed_mid_job_has_its_processes_and_files_cleared(conn, run_for_real, tmp_path, mocker):
@@ -288,6 +286,6 @@ def test_real_child_killed_mid_job_has_its_processes_and_files_cleared(conn, run
     _, (job_id,) = run_for_real(["https://example.com/post/1"])
 
     current = db.get_job(conn, job_id)
-    assert current["status"] == "failed", (tmp_path / "slots" / "1" / "child.out").read_text()[-3000:]
+    assert current["status"] == "failed", (tmp_path / "logs" / "child.out").read_text()[-3000:]
     assert "killed" in current["error"]
-    assert not (tmp_path / "slots" / "1" / "tmp").exists()
+    assert not (tmp_path / "tmp").exists()

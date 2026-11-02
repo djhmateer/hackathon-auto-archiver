@@ -18,8 +18,8 @@ AA_DATABASE_URL=postgresql://bob:password@localhost:5432/auto_archiver
 poetry run python -m auto_archiver.job_queue.migrate
 # run the coordinator
 poetry run python -m auto_archiver.job_queue.coordinator
-# run the worker (--slots 1 is default and not required)
-poetry run python -m auto_archiver.job_queue.worker_supervisor --slots 1
+# run the worker
+poetry run python -m auto_archiver.job_queue.worker_supervisor
 ```
 
 Run the last two in separate terminals.
@@ -76,9 +76,9 @@ Run the script as your normal user, not root. It's safe to run again. It install
    journalctl -u aa-worker-supervisor -f
    ```
 
-The service runs 1 slot and reboots daily at 05:20 UK time. To change either, edit `/etc/systemd/system/aa-worker-supervisor.service`, then run `sudo systemctl daemon-reload`.
+A worker VM runs one job at a time, so more capacity means more VMs. It reboots daily at 05:20 UK time. To change that, edit `/etc/systemd/system/aa-worker-supervisor.service`, then run `sudo systemctl daemon-reload`.
 
-Stay on 1 slot per VM until the fixes in "Running rows at once" in `queue-spec.md` are done. A VM should run cron or a worker supervisor, not both.
+A VM should run cron or a worker supervisor, not both.
 
 ## Move a spreadsheet from cron to the queue
 
@@ -157,7 +157,5 @@ poetry run python -m auto_archiver.job_queue.writer discard <id>
 Logs:
 
 - **Coordinator and worker supervisor:** `journalctl -u aa-coordinator -f` and `journalctl -u aa-worker-supervisor -f`
-- **Archiver:** `slots/<slot>/logs/`, such as `1debug.log` and `hangs.log`
-- **Errors during a job's setup:** `slots/<slot>/child.out`
-
-The `aa-logs` import doesn't read `slots/` yet.
+- **Archiver:** `logs/`, such as `1debug.log` and `hangs.log`
+- **Errors during a job's setup:** `logs/child.out`

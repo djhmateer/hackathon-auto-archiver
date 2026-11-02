@@ -43,6 +43,6 @@ latest_logs
 # for launch.json
 .vscode
 url.txt
-# the job queue supervisor: each slot's logs and temp files
+# old job queue logs and temp files, from when a VM had slots
 slots/
 scripts/cron_*.sh
