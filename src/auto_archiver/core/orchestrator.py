@@ -114,6 +114,7 @@ class ArchivingOrchestrator:
         self.setup_finished = False
         self.logger_id = None
         self.hang_log = None  # logs/hangs.log, only opened when logging to logs/ (ie in production)
+        self.hang_log_path = "logs/hangs.log"
         self.running_item = None  # the row being archived, so a late kill timer can't kill the next row
 
     def setup_basic_parser(self):
@@ -438,18 +439,22 @@ Here's how that would look: \n\nsteps:\n  extractors:\n  - [your_extractor_name_
                 #     )
                 # DM 25th Jun - I prefer this as am used to it, and it gives colour coded logs
                 # also my cron job looks at the output of 1debug.log which is critical (todo - maybe not so critical anymore)
-                logger.add("logs/1debug.log", level="DEBUG", rotation=rotation)
+                # the queue's supervisor sets AA_SLOT_DIR, so slots on one VM don't share log files. Otherwise ./logs
+                log_dir = os.path.join(os.environ.get("AA_SLOT_DIR", ""), "logs")
+                os.makedirs(log_dir, exist_ok=True)
+                logger.add(os.path.join(log_dir, "1debug.log"), level="DEBUG", rotation=rotation)
 
                 # DM 7th Nov 25 - turned off the serialzed log to save SSD wear
                 # logger.add("logs/x1debug.log", level="DEBUG", rotation=rotation, format="{extra[serialized]}")
                 # logger.add("logs/2info.log", level="INFO", rotation=rotation, format="{extra[serialized]}")
-                logger.add("logs/3success.log", level="SUCCESS", rotation=rotation, format="{extra[serialized]}")
-                logger.add("logs/4warning.log", level="WARNING", rotation=rotation, format="{extra[serialized]}")
-                logger.add("logs/5error.log", level="ERROR", rotation=rotation, format="{extra[serialized]}")
+                logger.add(os.path.join(log_dir, "3success.log"), level="SUCCESS", rotation=rotation, format="{extra[serialized]}")
+                logger.add(os.path.join(log_dir, "4warning.log"), level="WARNING", rotation=rotation, format="{extra[serialized]}")
+                logger.add(os.path.join(log_dir, "5error.log"), level="ERROR", rotation=rotation, format="{extra[serialized]}")
 
                 # DM 23rd Oct 26 - server 12 hung for 13h and we couldn't see where. Every thread's stack is
                 # written here when a row runs too long (see feed), or on demand with: kill -USR1 <pid>
-                self.hang_log = open("logs/hangs.log", "a")
+                self.hang_log_path = os.path.join(log_dir, "hangs.log")
+                self.hang_log = open(self.hang_log_path, "a")
                 faulthandler.register(signal.SIGUSR1, file=self.hang_log, all_threads=True)
             elif log_file:
                 logger.add(log_file, rotation=rotation, level=use_level, format="{extra[serialized]}")
@@ -669,7 +674,7 @@ Here's how that would look: \n\nsteps:\n  extractors:\n  - [your_extractor_name_
         self.hang_log.write(f"\n===== {now} UTC pid {os.getpid()} row running for {HANG_DUMP_SECONDS // 60} min: {url}\n")
         self.hang_log.flush()
         faulthandler.dump_traceback(file=self.hang_log, all_threads=True)
-        logger.warning(f"Row still running after {HANG_DUMP_SECONDS // 60} minutes, thread stacks written to logs/hangs.log: {url}")
+        logger.warning(f"Row still running after {HANG_DUMP_SECONDS // 60} minutes, thread stacks written to {self.hang_log_path}: {url}")
 
     def _kill_hung_row(self, item: Metadata) -> None:
         """
@@ -809,7 +814,12 @@ Here's how that would look: \n\nsteps:\n  extractors:\n  - [your_extractor_name_
         """
         tmp_dir: TemporaryDirectory = None
         try:
-            tmp_dir = TemporaryDirectory(dir="./")
+            # the queue's supervisor sets AA_SLOT_DIR, so it can wipe a killed job's files
+            tmp_parent = "./"
+            if slot_dir := os.environ.get("AA_SLOT_DIR"):
+                tmp_parent = os.path.join(slot_dir, "tmp")
+                os.makedirs(tmp_parent, exist_ok=True)
+            tmp_dir = TemporaryDirectory(dir=tmp_parent)
             # set tmp_dir on all modules
             for m in self.all_modules:
                 m.tmp_dir = tmp_dir.name

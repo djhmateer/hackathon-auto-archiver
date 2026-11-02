@@ -207,10 +207,14 @@ class WaczExtractorEnricher(Enricher, Extractor):
             if self.docker_commands:
                 cmd = self.docker_commands + cmd
             else:
+                # the queue's supervisor sets AA_JOB_ID: killing `docker run` leaves the container crawling, so it's
+                # named for the supervisor to remove
+                job_id = os.environ.get("AA_JOB_ID")
                 cmd = [
                     "docker",
                     "run",
                     "--rm",
+                    *(["--name", f"aa-job-{job_id}"] if job_id else []),
                     "-v",
                     f"{browsertrix_home_host}:/crawls/",
                     "-e",
@@ -1309,7 +1313,10 @@ class WaczExtractorEnricher(Enricher, Extractor):
 
             browsertrix_home = linux_tmp_dir
 
-            docker_commands = ["docker", "run", "--rm", "-v", f"{browsertrix_home}:/crawls/", "webrecorder/browsertrix-crawler"]
+            # named like the main crawl, for the queue's supervisor to remove. These crawls run one at a time
+            job_id = os.environ.get("AA_JOB_ID")
+            name = ["--name", f"aa-job-{job_id}"] if job_id else []
+            docker_commands = ["docker", "run", "--rm", *name, "-v", f"{browsertrix_home}:/crawls/", "webrecorder/browsertrix-crawler"]
             cmd = docker_commands + [
                 "crawl",
                 "--url", url_build,

@@ -11,10 +11,9 @@ The filtered rows are processed into `Metadata` objects.
 
 from datetime import datetime, timezone
 import os
-import re
 import traceback
 from typing import Tuple, Union, Iterator
-from urllib.parse import quote, urlparse
+from urllib.parse import quote
 
 import gspread
 from auto_archiver.utils.custom_logger import logger
@@ -25,11 +24,100 @@ from auto_archiver.core import Feeder, Database, Media
 from auto_archiver.core import Metadata
 from auto_archiver.modules.gsheet_feeder_db import GWorksheet
 from auto_archiver.utils.misc import get_current_timestamp
+from auto_archiver.utils.url import sheet_url_hostname
 
 
 # sheet "screenshot" column source, in order of preference: facebook_story_extractor, screenshot_enricher,
 # antibot_extractor_enricher, then the crawler's (DM 22nd Oct 26 - eg when the screenshot enricher's was a block page)
 SCREENSHOT_MEDIA_IDS = ("screenshot", "webdriverscreenshot", "antibot_screenshot", "browsertrix-screenshot-0")
+
+
+def build_result_cells(item: Metadata, cached: bool = False) -> dict:
+    """An archived item's sheet cells as {column: value}, with status first. Needs no access to the sheet"""
+    cells = {}
+
+    def add_if_valid(col, val, final_value=None):
+        if val:
+            cells[col] = final_value or val
+
+    status_message = item.status
+    if cached:
+        status_message = f"[cached] {status_message}"
+    # otherwise a row with a file that couldn't be stored looks fully archived
+    if failures := item.get_store_failures():
+        status_message += f" ({len(failures)} upload{'s' if len(failures) > 1 else ''} failed - see logs)"
+    for note in item.get_status_notes():
+        status_message += f" ({note})"
+    cells["status"] = status_message
+
+    media: Media = item.get_final_media()
+    if hasattr(media, "urls"):
+        add_if_valid("archive", "\n".join(media.urls))
+    add_if_valid("date", True, get_current_timestamp())
+    add_if_valid("title", item.get_title())
+    add_if_valid("text", item.get("content", ""))
+    add_if_valid("timestamp", item.get_timestamp())
+    if media:
+        add_if_valid("hash", media.get("hash", "not-calculated"))
+
+    # merge all pdq hashes into a single string, if present
+    pdq_hashes = []
+    all_media = item.get_all_media()
+    for m in all_media:
+        if pdq := m.get("pdq_hash"):
+            pdq_hashes.append(pdq)
+    if len(pdq_hashes):
+        add_if_valid("pdq_hash", ",".join(pdq_hashes))
+
+    # DM 2nd Oct 26 - each module uses its own screenshot id (add_media rejects duplicate ids), so take the first
+    # present. Only "screenshot" was checked since the Jun 25 rename, leaving the column empty bar fb stories
+    for screenshot_id in SCREENSHOT_MEDIA_IDS:
+        if (screenshot := item.get_media_by_id(screenshot_id)) and getattr(screenshot, "urls", None):
+            add_if_valid("screenshot", "\n".join(screenshot.urls))
+            break
+
+    # DM 2nd Oct 26 - a media whose upload failed has urls == [], which made urls[0] raise and lose the whole row
+    # update (7x in prod, 6-15 Sep 26)
+    if (thumbnail := item.get_first_image("thumbnail")) and getattr(thumbnail, "urls", None):
+        add_if_valid("thumbnail", f'=IMAGE("{thumbnail.urls[0]}")')
+
+    if browsertrix := item.get_media_by_id("browsertrix"):
+        add_if_valid("wacz", "\n".join(browsertrix.urls))
+        add_if_valid(
+            "replaywebpage",
+            "\n".join(
+                [
+                    f"https://replayweb.page/?source={quote(wacz)}#view=pages&url={quote(item.get_url())}"
+                    for wacz in browsertrix.urls
+                ]
+            ),
+        )
+    return cells
+
+
+def cells_to_write(cells: dict, col_exists, existing_value, allow_overwrite: bool) -> dict:
+    """
+    Which of a row's cells to write, given the sheet as it is now. Status is always written. Other cells need their
+    column to exist, and an empty cell unless overwriting is allowed
+    """
+    to_write = {}
+    for col, val in cells.items():
+        if col == "status":
+            to_write[col] = val
+            continue
+        try:
+            if not col_exists(col):
+                continue
+            # bug - thumbnail column will always come back as no value
+            # it is a formula eg =IMAGE("https://autoarchiverfeatures.fra1.cdn.digitaloceanspaces.com/aaf001/eb6625005b563ece063e8bd2.webp")
+            if existing := existing_value(col):
+                if not allow_overwrite:
+                    continue
+                logger.info(f"Overwriting spreadsheet cell {col}={existing} with {val}")
+            to_write[col] = val
+        except Exception as e:
+            logger.error(f"Unable to batch {col}={val} due to {e}")
+    return to_write
 
 
 class GsheetsFeederDB(Feeder, Database):
@@ -101,11 +189,8 @@ class GsheetsFeederDB(Feeder, Database):
                 continue
 
             # DM 29th Oct 26 - a cell like "N/A" became https://N/A and went through every extractor
-            # strip any stray leading punctuation (eg ": https://...") and scheme as the orchestrator does, then
             # a real hostname has a dot
-            bare = re.sub(r"^\W*(https?://)?", "", url)
-            hostname = urlparse(f"https://{bare}").hostname or ""
-            if "." not in hostname:
+            if "." not in sheet_url_hostname(url):
                 logger.warning(f"Row {row} is not a valid URL - skipping: {url}")
                 gw.set_cell(row, "status", "WARNING: not a valid URL")
                 continue
@@ -191,86 +276,20 @@ class GsheetsFeederDB(Feeder, Database):
         worksheet = gw.wks.title
         logger.success(f" row {row} on {spreadsheet} : {worksheet}")
 
-        cell_updates = []
         row_values = gw.get_row(row)
 
         logger.info("DONE")
 
-        def batch_if_valid(col, val, final_value=None):
-            final_value = final_value or val
-            try:
-                # if val and gw.col_exists(col) and gw.get_cell(row_values, col) == "":
-                
-                if val and gw.col_exists(col):
-                    # bug - thumbnail column will always come back as no value
-                    # it is a formula eg =IMAGE("https://autoarchiverfeatures.fra1.cdn.digitaloceanspaces.com/aaf001/eb6625005b563ece063e8bd2.webp")
-                    existing_value = gw.get_cell(row_values, col)
-                    if existing_value:
-                        if self.allow_overwrite_of_spreadsheet_cells:
-                            logger.info(f"Overwriting spreadsheet cell {col}={existing_value} with {final_value}")
-                        else:
-                            # logger.warning(f"NOT overwriting spreadsheet cell {col}={existing_value} with {final_value}")
-                            return
-                    # else:
-                        # logger.info(f"No existing value for {col}")
-                    
-                    cell_updates.append((row, col, final_value))
-            except Exception as e:
-                logger.error(f"Unable to batch {col}={final_value} due to {e}")
-
-        status_message = item.status
-        if cached:
-            status_message = f"[cached] {status_message}"
-        # otherwise a row with a file that couldn't be stored looks fully archived
         if failures := item.get_store_failures():
             logger.warning(f"{len(failures)} file(s) couldn't be stored for row {row}: {', '.join(failures)}")
-            status_message += f" ({len(failures)} upload{'s' if len(failures) > 1 else ''} failed - see logs)"
-        for note in item.get_status_notes():
-            status_message += f" ({note})"
-        cell_updates.append((row, "status", status_message))
 
-        media: Media = item.get_final_media()
-        if hasattr(media, "urls"):
-            batch_if_valid("archive", "\n".join(media.urls))
-        batch_if_valid("date", True, get_current_timestamp())
-        batch_if_valid("title", item.get_title())
-        batch_if_valid("text", item.get("content", ""))
-        batch_if_valid("timestamp", item.get_timestamp())
-        if media:
-            batch_if_valid("hash", media.get("hash", "not-calculated"))
-
-        # merge all pdq hashes into a single string, if present
-        pdq_hashes = []
-        all_media = item.get_all_media()
-        for m in all_media:
-            if pdq := m.get("pdq_hash"):
-                pdq_hashes.append(pdq)
-        if len(pdq_hashes):
-            batch_if_valid("pdq_hash", ",".join(pdq_hashes))
-
-        # DM 2nd Oct 26 - each module uses its own screenshot id (add_media rejects duplicate ids), so take the first
-        # present. Only "screenshot" was checked since the Jun 25 rename, leaving the column empty bar fb stories
-        for screenshot_id in SCREENSHOT_MEDIA_IDS:
-            if (screenshot := item.get_media_by_id(screenshot_id)) and getattr(screenshot, "urls", None):
-                batch_if_valid("screenshot", "\n".join(screenshot.urls))
-                break
-
-        # DM 2nd Oct 26 - a media whose upload failed has urls == [], which made urls[0] raise and lose the whole row
-        # update (7x in prod, 6-15 Sep 26)
-        if (thumbnail := item.get_first_image("thumbnail")) and getattr(thumbnail, "urls", None):
-            batch_if_valid("thumbnail", f'=IMAGE("{thumbnail.urls[0]}")')
-
-        if browsertrix := item.get_media_by_id("browsertrix"):
-            batch_if_valid("wacz", "\n".join(browsertrix.urls))
-            batch_if_valid(
-                "replaywebpage",
-                "\n".join(
-                    [
-                        f"https://replayweb.page/?source={quote(wacz)}#view=pages&url={quote(item.get_url())}"
-                        for wacz in browsertrix.urls
-                    ]
-                ),
-            )
+        to_write = cells_to_write(
+            build_result_cells(item, cached),
+            gw.col_exists,
+            lambda col: gw.get_cell(row_values, col),
+            self.allow_overwrite_of_spreadsheet_cells,
+        )
+        cell_updates = [(row, col, val) for col, val in to_write.items()]
 
         @retry(
             wait_exponential_multiplier=1,

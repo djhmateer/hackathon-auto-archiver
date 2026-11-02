@@ -58,6 +58,18 @@ def check_url_or_raise(url: str) -> str | ValueError:
     return url
 
 
+def sheet_url_hostname(url: str) -> str:
+    """
+    The hostname of a URL from a spreadsheet cell, or "" if it hasn't got one.
+    Strips stray leading punctuation (eg ": https://...") and the scheme as check_url_or_raise does
+    """
+    bare = re.sub(r"^\W*(https?://)?", "", url)
+    try:
+        return urlparse(f"https://{bare}").hostname or ""
+    except ValueError:
+        return ""  # eg an unmatched [ in the host
+
+
 def domain_for_url(url: str) -> str:
     """
     SECURITY: parse the domain using urllib to avoid any potential security issues

@@ -1,0 +1,16 @@
+# The queue's coordinator: one, on its own VM. Copy to /etc/systemd/system/. Change the paths if not /home/dave
+# .env in the repo root holds one line: AA_DATABASE_URL=<connection string>
+[Unit]
+Description=Auto Archiver queue coordinator
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=dave
+WorkingDirectory=/home/dave/auto-archiver
+ExecStart=/home/dave/.local/bin/poetry run python -m auto_archiver.job_queue.coordinator
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target

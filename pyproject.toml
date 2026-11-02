@@ -65,7 +65,9 @@ dependencies = [
     "pyautogui (>=0.9.54,<0.10.0)",
     #"pyperclip (==1.8.2)", 
     "pyperclip (>=0.0.0)",
-    "pytesseract (>=0.3.13,<0.4.0)", 
+    "pytesseract (>=0.3.13,<0.4.0)",
+    # needs libpq5 on the host (apt install libpq5)
+    "psycopg (>=3.2,<4.0)",
 ]
 
 # uwazi API https://github.com/huridocs/python_uwazi_API

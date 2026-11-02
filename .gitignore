@@ -43,3 +43,6 @@ latest_logs
 # for launch.json
 .vscode
 url.txt
+# the job queue supervisor: each slot's logs and temp files
+slots/
+scripts/cron_*.sh

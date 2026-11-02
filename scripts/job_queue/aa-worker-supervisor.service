@@ -1,0 +1,26 @@
+# The queue's supervisor: one on each worker VM. Copy to /etc/systemd/system/. Change the paths if not /home/dave
+# .env in the repo root holds one line: AA_DATABASE_URL=<connection string>
+#
+# To finish the running jobs then stop, however long they take:
+#   sudo systemctl kill --kill-who=main -s SIGTERM aa-worker-supervisor
+# `systemctl stop`, and a reboot, kill anything still running after 15 minutes. Its job comes back when the lease expires
+[Unit]
+Description=Auto Archiver queue supervisor
+After=network-online.target docker.service
+Wants=network-online.target
+
+[Service]
+User=dave
+WorkingDirectory=/home/dave/auto-archiver
+# deno is needed by yt-dlp
+Environment=PATH=/home/dave/.local/bin:/home/dave/.deno/bin:/usr/local/bin:/usr/bin:/bin
+ExecStart=/home/dave/.local/bin/poetry run python -m auto_archiver.job_queue.worker_supervisor --slots 1 --reboot-at 05:20
+# only the supervisor gets the stop signal, so jobs can finish
+KillMode=mixed
+TimeoutStopSec=15min
+# a drain exits cleanly and stays stopped
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target

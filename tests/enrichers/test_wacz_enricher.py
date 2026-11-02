@@ -1510,3 +1510,39 @@ def test_wacz_image_logs_where_the_page_puts_it(wacz_enricher, tmp_path, mocker,
         assert "alt=\"The article's photo\"" in lines[1]
         summary = next(c[0][0] for c in mock_info.call_args_list if c[0][0].startswith("WACZ images of"))
         assert summary == f"WACZ images of {ARTICLE_URL}: 4 kept - og=1, article=1, html=1, none=1"
+
+
+def _crawl_with_main_path(wacz_enricher, mocker, tmp_path):
+    mock_run = mocker.patch("subprocess.run")
+    mocker.patch("os.path.exists", return_value=False)
+    wacz_enricher.use_docker = True
+    wacz_enricher.enrich(Metadata().set_url("https://example.com"))
+    return mock_run.call_args[0][0]
+
+
+def test_main_crawl_is_named_for_a_queue_job(wacz_enricher, mocker, tmp_path, monkeypatch):
+    monkeypatch.setenv("AA_JOB_ID", "7")
+    cmd = _crawl_with_main_path(wacz_enricher, mocker, tmp_path)
+    assert cmd[cmd.index("--name") + 1] == "aa-job-7"
+
+
+def test_main_crawl_has_no_name_outside_the_queue(wacz_enricher, mocker, tmp_path, monkeypatch):
+    monkeypatch.delenv("AA_JOB_ID", raising=False)
+    assert "--name" not in _crawl_with_main_path(wacz_enricher, mocker, tmp_path)
+
+
+def test_facebook_crawl_is_named_for_a_queue_job(wacz_enricher, mocker, tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)  # it writes url.txt to the working directory
+    monkeypatch.setenv("AA_JOB_ID", "7")
+    mock_run = mocker.patch("subprocess.run")
+    wacz_enricher._fb_browsertrix_crawl("https://example.com/photo", "1")
+    cmd = mock_run.call_args[0][0]
+    assert cmd[cmd.index("--name") + 1] == "aa-job-7"
+
+
+def test_facebook_crawl_has_no_name_outside_the_queue(wacz_enricher, mocker, tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("AA_JOB_ID", raising=False)
+    mock_run = mocker.patch("subprocess.run")
+    wacz_enricher._fb_browsertrix_crawl("https://example.com/photo", "1")
+    assert "--name" not in mock_run.call_args[0][0]
