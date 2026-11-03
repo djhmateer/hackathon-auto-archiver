@@ -50,5 +50,5 @@ def database_url() -> str:
 @pytest.fixture
 def conn(schema):
     with db.connect(TEST_URL) as conn:
-        conn.execute("TRUNCATE sheets, jobs, outbox, shadow_jobs, alerts, heartbeats RESTART IDENTITY CASCADE")
+        conn.execute("TRUNCATE sheets, jobs, sheet_writes, admin_alerts, heartbeats RESTART IDENTITY CASCADE")
         yield conn

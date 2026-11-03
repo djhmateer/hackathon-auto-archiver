@@ -1,4 +1,4 @@
-"""Shadow mode against real Postgres and a fake spreadsheet that answers range reads like the Sheets API"""
+"""How sync reads sheets, against real Postgres and a fake spreadsheet that answers range reads like the Sheets API"""
 
 import pytest
 from job_queue_fakes import FakeSpreadsheet, FakeTab, opener_for
@@ -28,9 +28,8 @@ def config(tmp_path, monkeypatch):
     return write
 
 
-def shadow_jobs(conn, open_only=True):
-    where = "WHERE closed_at IS NULL" if open_only else ""
-    return conn.execute(f"SELECT * FROM shadow_jobs {where} ORDER BY id").fetchall()
+def queued(conn):
+    return conn.execute("SELECT * FROM jobs WHERE status = 'queued' ORDER BY id").fetchall()
 
 
 def run(conn, spreadsheet):
@@ -38,7 +37,9 @@ def run(conn, spreadsheet):
 
 
 def setup_sheet(conn, spreadsheet):
+    """Registers the tabs and turns them on, as a tab that's off isn't read"""
     sync.register(conn, CONFIG, opener_for(spreadsheet))
+    conn.execute("UPDATE sheets SET enabled = true")
 
 
 def test_register_adds_tabs_switched_off(conn, config):
@@ -66,84 +67,12 @@ def test_register_keeps_to_the_allow_and_block_lists(conn, config):
     assert sync.register(conn, CONFIG, opener_for(sheet)) == 1
 
 
-def test_blank_rows_are_recorded_and_others_are_not(conn, config):
-    sheet = FakeSpreadsheet(
-        [
-            tab_of(
-                row("https://example.com/1"),
-                row("https://example.com/2", "success"),
-                row(""),
-                row("https://example.com/4"),
-                row("N/A"),
-                row("https://example.com/6", "Archive in progress"),
-            )
-        ]
-    )
-    setup_sheet(conn, sheet)
-    run(conn, sheet)
-    assert [(j["row_number"], j["url"]) for j in shadow_jobs(conn)] == [
-        (2, "https://example.com/1"),
-        (5, "https://example.com/4"),
-    ]
-    assert conn.execute("SELECT count(*) AS n FROM alerts").fetchone()["n"] == 0, "cron's statuses are normal"
-    assert conn.execute("SELECT count(*) AS n FROM jobs").fetchone()["n"] == 0
-    assert conn.execute("SELECT count(*) AS n FROM outbox").fetchone()["n"] == 0
-
-
-def test_second_pass_adds_no_duplicates_and_keeps_added_at(conn, config):
+def test_a_tab_that_is_off_is_not_read(conn, config):
     sheet = FakeSpreadsheet([tab_of(row("https://example.com/1"))])
-    setup_sheet(conn, sheet)
+    sync.register(conn, CONFIG, opener_for(sheet))
     run(conn, sheet)
-    first = shadow_jobs(conn)
-    run(conn, sheet)
-    assert shadow_jobs(conn) == first
-    assert sheet.tabs[0].writes == [], "shadow mode never writes to a sheet"
-
-
-def test_cron_picking_up_a_row_closes_it(conn, config):
-    tab = tab_of(row("https://example.com/1"))
-    sheet = FakeSpreadsheet([tab])
-    setup_sheet(conn, sheet)
-    run(conn, sheet)
-    tab.rows[1] = row("https://example.com/1", "Archive in progress")
-    run(conn, sheet)
-    assert shadow_jobs(conn) == []
-    assert shadow_jobs(conn, open_only=False)[0]["closed_at"] is not None
-
-
-def test_client_clearing_a_finished_row_records_it_again(conn, config):
-    tab = tab_of(row("https://example.com/1"))
-    sheet = FakeSpreadsheet([tab])
-    setup_sheet(conn, sheet)
-    run(conn, sheet)
-    tab.rows[1] = row("https://example.com/1", "success")
-    run(conn, sheet)
-    tab.rows[1] = row("https://example.com/1")
-    run(conn, sheet)
-    assert len(shadow_jobs(conn)) == 1
-    assert len(shadow_jobs(conn, open_only=False)) == 2
-
-
-def test_changed_url_closes_it_then_records_the_new_one(conn, config):
-    tab = tab_of(row("https://example.com/1"))
-    sheet = FakeSpreadsheet([tab])
-    setup_sheet(conn, sheet)
-    run(conn, sheet)
-    tab.rows[1] = row("https://example.com/new")
-    run(conn, sheet)
-    assert shadow_jobs(conn) == []
-    run(conn, sheet)
-    assert [j["url"] for j in shadow_jobs(conn)] == ["https://example.com/new"]
-
-
-def test_url_removed_from_a_row_closes_it(conn, config):
-    tab = tab_of(row("https://example.com/1"), row("https://example.com/2"))
-    sheet = FakeSpreadsheet([tab])
-    setup_sheet(conn, sheet)
-    run(conn, sheet)
-    tab.rows[1] = row("")
-    run(conn, sheet)
-    assert [j["row_number"] for j in shadow_jobs(conn)] == [3]
+    assert sheet.ranges_read == []
+    assert conn.execute("SELECT count(*) AS n FROM jobs").fetchone()["n"] == 0
 
 
 def test_reads_only_the_needed_columns_in_two_calls(conn, config):
@@ -169,7 +98,7 @@ def test_blank_rows_inside_a_column_keep_row_numbers_right(conn, config):
     )
     setup_sheet(conn, sheet)
     run(conn, sheet)
-    assert [j["row_number"] for j in shadow_jobs(conn)] == [3]
+    assert [j["row_number"] for j in queued(conn)] == [3]
 
 
 def test_custom_header_row_and_column_names(conn, config):
@@ -179,14 +108,14 @@ def test_custom_header_row_and_column_names(conn, config):
     setup_sheet(conn, sheet)
     run(conn, sheet)
     assert sheet.ranges_read[1:] == ["'Tab 1'!A2:A", "'Tab 1'!C2:C"]
-    assert [j["row_number"] for j in shadow_jobs(conn)] == [3]
+    assert [j["row_number"] for j in queued(conn)] == [3]
 
 
 def test_tab_title_needing_quotes_is_read(conn, config):
     sheet = FakeSpreadsheet([tab_of(row("https://example.com/1"), title="Dave's tab")])
     setup_sheet(conn, sheet)
     run(conn, sheet)
-    assert len(shadow_jobs(conn)) == 1
+    assert len(queued(conn)) == 1
 
 
 def test_helper_tab_without_the_columns_is_skipped(conn, config):
@@ -194,7 +123,7 @@ def test_helper_tab_without_the_columns_is_skipped(conn, config):
     sheet = FakeSpreadsheet([tab_of(row("https://example.com/1")), helper])
     setup_sheet(conn, sheet)
     run(conn, sheet)
-    assert len(shadow_jobs(conn)) == 1
+    assert len(queued(conn)) == 1
 
 
 def test_new_tab_is_found_and_a_rename_is_kept(conn, config):
@@ -206,7 +135,7 @@ def test_new_tab_is_found_and_a_rename_is_kept(conn, config):
     sheet.tabs.append(tab_of(row("https://example.com/2"), gid=2, title="New tab"))
     run(conn, sheet)
     assert [s["worksheet"] for s in db.get_sheets(conn)] == ["Renamed", "New tab"]
-    assert len(shadow_jobs(conn)) == 2, "the renamed tab's job stays open, not duplicated"
+    assert len(queued(conn)) == 2, "the renamed tab's job isn't duplicated"
 
 
 def test_spreadsheet_name_is_saved_and_kept_up_to_date(conn, config):
@@ -233,7 +162,7 @@ def test_row_without_a_folder_is_not_recorded_when_one_is_required(conn, config)
     )
     setup_sheet(conn, sheet)
     run(conn, sheet)
-    assert [j["row_number"] for j in shadow_jobs(conn)] == [2]
+    assert [j["row_number"] for j in queued(conn)] == [2]
 
 
 def test_tab_renamed_out_of_the_allow_list_gets_a_warning(conn, config, mocker):
@@ -248,13 +177,14 @@ def test_tab_renamed_out_of_the_allow_list_gets_a_warning(conn, config, mocker):
     run(conn, sheet)
 
     assert "Tab 1 (sheet 1) is not being read" in logger.warning.call_args.args[0]
-    assert len(shadow_jobs(conn)) == 1, "its job is left as it was"
+    assert len(queued(conn)) == 1, "its job is left as it was"
 
 
 def test_one_broken_spreadsheet_does_not_stop_the_others(conn, config):
     good = FakeSpreadsheet([tab_of(row("https://example.com/1"))], spreadsheet_id="good")
     db.save_tab(conn, "bad", 1, "Tab 1", CONFIG)
     db.save_tab(conn, "good", 1, "Tab 1", CONFIG)
+    conn.execute("UPDATE sheets SET enabled = true")
 
     def opener(settings, spreadsheet_id=None):
         if spreadsheet_id == "bad":
@@ -262,7 +192,7 @@ def test_one_broken_spreadsheet_does_not_stop_the_others(conn, config):
         return good
 
     sync.sync_cycle(conn, opener)
-    assert len(shadow_jobs(conn)) == 1
+    assert len(queued(conn)) == 1
     assert conn.execute("SELECT count(*) AS n FROM heartbeats WHERE name = 'sync'").fetchone()["n"] == 1
 
 
@@ -291,4 +221,4 @@ def test_tab_summary_is_only_logged_when_it_changes(conn, config, caplog):
     assert caplog.text.count("row(s) with a URL") == 1
     tab.rows.append(row("https://example.com/2"))
     run(conn, sheet)
-    assert "Sheet 'Example Sheet' tab Tab 1 (shadow): 2 row(s) with a URL" in caplog.text
+    assert "Sheet 'Example Sheet' tab Tab 1 (live): 2 row(s) with a URL" in caplog.text

@@ -94,7 +94,7 @@ def test_a_row_from_blank_through_to_its_result(conn, sheet_id, sheet, tab):
     db.finish_job(conn, job["id"], job["lease_token"], "done", {"status": "ok", "title": "A title"})
     run_sync(conn, sheet)
     assert len(jobs(conn)) == 1, "the sheet still says in progress, and there's no alert"
-    assert conn.execute("SELECT count(*) AS n FROM alerts").fetchone()["n"] == 0
+    assert conn.execute("SELECT count(*) AS n FROM admin_alerts").fetchone()["n"] == 0
 
     run_writer(conn, sheet)
     assert cell(tab, "B2") == "ok"
@@ -113,7 +113,7 @@ def test_client_clearing_a_finished_row_gets_a_new_job(conn, sheet_id, sheet, ta
 
     tab.rows[1][1] = ""
     # a read from before the result was written would look the same: the snapshot check has to tell them apart
-    conn.execute("UPDATE outbox SET written_at = now() - interval '1 minute'")
+    conn.execute("UPDATE sheet_writes SET written_at = now() - interval '1 minute'")
     run_sync(conn, sheet)
     assert len(jobs(conn)) == 2
 
@@ -123,7 +123,7 @@ def test_result_is_written_over_an_in_progress_row_from_before_worker_names(conn
     run_writer(conn, sheet)
     job = claim(conn)
     tab.rows[1] = row(status="Archive in progress")
-    db.mark_written(conn, [conn.execute("SELECT max(id) AS id FROM outbox").fetchone()["id"]])
+    db.mark_written(conn, [conn.execute("SELECT max(id) AS id FROM sheet_writes").fetchone()["id"]])
     db.finish_job(conn, job["id"], job["lease_token"], "done", {"status": "ok"})
     run_writer(conn, sheet)
     assert cell(tab, "B2") == "ok"
@@ -204,7 +204,7 @@ def test_changed_url_cancels_clears_then_adds_the_new_one(conn, sheet_id, sheet,
     assert conflicts(conn) == []
 
     # the clear was written after this pass's snapshot only if they overlap, so it may take one more pass
-    conn.execute("UPDATE outbox SET written_at = now() - interval '1 minute'")
+    conn.execute("UPDATE sheet_writes SET written_at = now() - interval '1 minute'")
     run_sync(conn, sheet)
     assert [(j["status"], j["url"]) for j in jobs(conn)] == [("cancelled", URL), ("queued", new_url)]
 
@@ -213,18 +213,8 @@ def test_disagreement_alerts_only_once_a_day(conn, sheet_id, sheet, tab):
     tab.rows[1] = row(status="Queued")
     run_sync(conn, sheet)
     run_sync(conn, sheet)
-    alerts = conn.execute("SELECT * FROM alerts").fetchall()
+    alerts = conn.execute("SELECT * FROM admin_alerts").fetchall()
     assert [a["kind"] for a in alerts] == ["sheet_disagrees"]
-
-
-def test_shadow_and_live_tabs_stay_separate(conn, config, sheet):
-    live, shadow = FakeTab(1, "Live", [HEADERS, row()]), FakeTab(2, "Shadow", [HEADERS, row()])
-    both = FakeSpreadsheet([live, shadow])
-    sync.register(conn, CONFIG, opener_for(both))
-    conn.execute("UPDATE sheets SET enabled = true WHERE worksheet = 'Live'")
-    run_sync(conn, both)
-    assert len(jobs(conn)) == 1
-    assert len(conn.execute("SELECT * FROM shadow_jobs").fetchall()) == 1
 
 
 # the writer's sanity check
@@ -236,7 +226,7 @@ def test_changed_url_is_a_conflict_and_writes_nothing(conn, sheet_id, sheet, tab
     assert run_writer(conn, sheet) == 0
     assert tab.writes == []
     assert "the URL has changed" in conflicts(conn)[0]["conflict"]
-    assert [a["kind"] for a in conn.execute("SELECT * FROM alerts").fetchall()] == ["writer_conflict"]
+    assert [a["kind"] for a in conn.execute("SELECT * FROM admin_alerts").fetchall()] == ["writer_conflict"]
 
 
 def test_unexpected_status_is_a_conflict_and_writes_nothing(conn, sheet_id, sheet, tab):
@@ -265,7 +255,7 @@ def test_conflict_stays_until_someone_retries_it(conn, sheet_id, sheet, tab):
     tab.rows[1][1] = ""  # the sheet looks right again, but a person decides
     assert run_writer(conn, sheet) == 0
     assert tab.writes == []
-    assert len(conn.execute("SELECT * FROM alerts").fetchall()) == 1
+    assert len(conn.execute("SELECT * FROM admin_alerts").fetchall()) == 1
 
 
 def test_conflict_blocks_the_row_until_resolved(conn, sheet_id, sheet, tab):
@@ -297,12 +287,12 @@ def test_discard_lets_later_entries_go_on(conn, sheet_id, sheet, tab):
     entry = conflicts(conn)[0]
     assert db.discard_conflict(conn, entry["id"]) is True
     assert conflicts(conn) == []
-    assert db.get_next_outbox_entries(conn) == []
+    assert db.get_next_sheet_writes(conn) == []
 
 
 def test_retry_and_discard_need_a_conflict(conn, sheet_id):
     add_entry_job(conn, sheet_id)
-    entry = db.get_next_outbox_entries(conn)[0]
+    entry = db.get_next_sheet_writes(conn)[0]
     assert db.retry_conflict(conn, entry["id"]) is False
     assert db.discard_conflict(conn, entry["id"]) is False
 
@@ -319,9 +309,9 @@ def test_sheet_write_failing_leaves_the_entry_to_try_again(conn, sheet_id, sheet
     add_entry_job(conn, sheet_id)
     mocker.patch.object(tab, "batch_update", side_effect=RuntimeError("a Sheets outage"))
     assert run_writer(conn, sheet) == 0
-    assert len(db.get_next_outbox_entries(conn)) == 1
+    assert len(db.get_next_sheet_writes(conn)) == 1
     assert conflicts(conn) == []
-    assert conn.execute("SELECT written_at FROM outbox").fetchone()["written_at"] is None
+    assert conn.execute("SELECT written_at FROM sheet_writes").fetchone()["written_at"] is None
 
     mocker.stopall()
     assert run_writer(conn, sheet) == 1

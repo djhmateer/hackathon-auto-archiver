@@ -48,7 +48,7 @@ def test_a_failure_rolls_back_that_file_and_stops(empty, tmp_path):
 
 def test_the_real_migrations_build_the_schema(empty):
     assert "001_initial.sql" in migrate.migrate(empty)
-    assert {"sheets", "jobs", "outbox", "alerts", "heartbeats"} <= tables(empty)
+    assert {"sheets", "jobs", "sheet_writes", "admin_alerts", "heartbeats"} <= tables(empty)
 
 
 def test_check_on_a_new_database_says_everything_is_pending(empty, tmp_path):

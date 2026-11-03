@@ -150,7 +150,7 @@ def log_startup(conn) -> None:
         tab = db.describe_tab(sheet["spreadsheet_name"], sheet["worksheet"])  # "tab ..." when the name isn't known yet
         logger.info(
             f"{tab[0].upper()}{tab[1:]} "
-            f"(sheet {sheet['id']}, {'live' if sheet['enabled'] else 'shadow'}{paused}): "
+            f"(sheet {sheet['id']}, {'live' if sheet['enabled'] else 'off'}{paused}): "
             f"spreadsheet {sheet['spreadsheet_id']}, config {sheet['config']}"
         )
     beats = db.get_worker_heartbeats(conn)

@@ -31,8 +31,8 @@ def job(conn, job_id) -> dict:
     return conn.execute("SELECT * FROM jobs WHERE id = %s", (job_id,)).fetchone()
 
 
-def outbox(conn, job_id) -> list[dict]:
-    return conn.execute("SELECT * FROM outbox WHERE job_id = %s ORDER BY id", (job_id,)).fetchall()
+def sheet_writes(conn, job_id) -> list[dict]:
+    return conn.execute("SELECT * FROM sheet_writes WHERE job_id = %s ORDER BY id", (job_id,)).fetchall()
 
 
 def expire_lease(conn, job_id, ago="3 minutes") -> None:
@@ -49,7 +49,7 @@ def make_available(conn, job_id) -> None:
 
 def test_add_job_queues_the_status_in_the_same_step(conn):
     job_id = add_job(conn, add_sheet(conn))
-    entries = outbox(conn, job_id)
+    entries = sheet_writes(conn, job_id)
     assert job(conn, job_id)["status"] == "queued"
     assert [(e["cells"], e["expected_status"]) for e in entries] == [({"status": "Queued"}, "")]
 
@@ -58,7 +58,7 @@ def test_row_can_only_have_one_active_job(conn):
     sheet = add_sheet(conn)
     first = add_job(conn, sheet)
     assert add_job(conn, sheet) is None
-    assert len(outbox(conn, first)) == 1
+    assert len(sheet_writes(conn, first)) == 1
 
     claimed = db.claim_job(conn, "vm1")
     assert add_job(conn, sheet) is None, "a running job is active too"
@@ -99,7 +99,7 @@ def test_claim_sets_the_lease_and_returns_the_config(conn):
 def test_claim_adds_the_in_progress_status(conn):
     job_id = add_job(conn, add_sheet(conn))
     db.claim_job(conn, "vm1")
-    entry = outbox(conn, job_id)[-1]
+    entry = sheet_writes(conn, job_id)[-1]
     assert entry["cells"] == {"status": "Archive in progress (vm1)"}
     assert entry["expected_status"] == "Queued"
 
@@ -217,7 +217,7 @@ def test_workers_claiming_at_once_never_get_the_same_job(conn, database_url):
     assert errors == []
     assert sorted(claimed) == sorted(job_ids)
     for job_id in job_ids:
-        assert len(outbox(conn, job_id)) == 2, "one Queued and one in progress entry"
+        assert len(sheet_writes(conn, job_id)) == 2, "one Queued and one in progress entry"
 
 
 # leases
@@ -251,7 +251,7 @@ def test_replaced_worker_cannot_renew_or_save(conn):
     db.requeue_expired(conn)
     make_available(conn, job_id)
     new = db.claim_job(conn, "vm2")
-    entries_before = len(outbox(conn, job_id))
+    entries_before = len(sheet_writes(conn, job_id))
 
     assert db.renew_lease(conn, job_id, old["lease_token"]) is False
     assert db.finish_job(conn, job_id, old["lease_token"], "done", {"status": "old"}) is False
@@ -263,7 +263,7 @@ def test_replaced_worker_cannot_renew_or_save(conn):
     assert now["worker"] == "vm2"
     assert now["lease_token"] == new["lease_token"]
     assert now["work_started_at"] is None
-    assert len(outbox(conn, job_id)) == entries_before
+    assert len(sheet_writes(conn, job_id)) == entries_before
 
 
 # finishing
@@ -277,7 +277,7 @@ def test_finish_saves_the_job_and_its_sheet_update_together(conn):
     finished = job(conn, job_id)
     assert finished["status"] == "done"
     assert finished["finished_at"] is not None
-    entry = outbox(conn, job_id)[-1]
+    entry = sheet_writes(conn, job_id)[-1]
     assert entry["cells"] == {"status": "ok", "title": "A title"}
     assert entry["expected_status"] == "Archive in progress"
 
@@ -301,11 +301,11 @@ def test_finish_only_counts_once(conn):
 def test_finish_rolls_back_the_job_if_the_sheet_update_fails(conn):
     job_id = add_job(conn, add_sheet(conn))
     token = db.claim_job(conn, "vm1")["lease_token"]
-    entries_before = len(outbox(conn, job_id))
+    entries_before = len(sheet_writes(conn, job_id))
     with pytest.raises(TypeError):
         db.finish_job(conn, job_id, token, "done", {"not json": object()})
     assert job(conn, job_id)["status"] == "running"
-    assert len(outbox(conn, job_id)) == entries_before
+    assert len(sheet_writes(conn, job_id)) == entries_before
 
 
 # cleanup
@@ -347,14 +347,14 @@ def test_retry_keeps_the_first_start_time_and_adds_no_status(conn):
     expire_lease(conn, job_id)
     db.requeue_expired(conn)
     make_available(conn, job_id)
-    entries_before = len(outbox(conn, job_id))
+    entries_before = len(sheet_writes(conn, job_id))
 
     second = db.claim_job(conn, "vm2")
     assert second["attempts"] == 2
     assert second["started_at"] == first["started_at"]
     assert second["work_started_at"] is None
     assert second["lease_token"] != first["lease_token"]
-    assert len(outbox(conn, job_id)) == entries_before
+    assert len(sheet_writes(conn, job_id)) == entries_before
 
 
 def test_cleanup_fails_the_job_after_three_attempts(conn):
@@ -368,7 +368,7 @@ def test_cleanup_fails_the_job_after_three_attempts(conn):
     failed = job(conn, job_id)
     assert failed["status"] == "failed"
     assert failed["finished_at"] is not None
-    entry = outbox(conn, job_id)[-1]
+    entry = sheet_writes(conn, job_id)[-1]
     assert entry["cells"]["status"] == "Archive failed - lost its worker 3 times - please rerun"
     assert entry["expected_status"] == "Archive in progress"
 
@@ -394,7 +394,7 @@ def test_reclaim_after_setup_failure_adds_no_second_in_progress(conn):
     db.release_setup_failure(conn, job_id, token)
     make_available(conn, job_id)
     assert db.claim_job(conn, "vm1")["attempts"] == 1
-    statuses = [e["cells"]["status"] for e in outbox(conn, job_id)]
+    statuses = [e["cells"]["status"] for e in sheet_writes(conn, job_id)]
     assert statuses == ["Queued", "Archive in progress (vm1)"]
 
 
@@ -414,7 +414,7 @@ def fail_setup(conn, job_id):
 
 
 def alerts(conn) -> list[dict]:
-    return conn.execute("SELECT * FROM alerts").fetchall()
+    return conn.execute("SELECT * FROM admin_alerts").fetchall()
 
 
 def sheet_row(conn, sheet_id) -> dict:

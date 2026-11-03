@@ -142,7 +142,7 @@ Postgres:
 ```
 Sheets ─► sheet sync ─► Postgres (jobs) ◄─ supervisors ─► one archiver process per job
    ▲                       │
-   └── sheet writer ◄── outbox
+   └── sheet writer ◄── sheet_writes
 ```
 
 There are two programs to deploy. The coordinator is one process on `pve2` that runs the sheet sync,
@@ -160,7 +160,7 @@ a heartbeat row. The supervisor runs on each worker VM.
   "Supervisor rules".
 - **`queue_feeder_db`**: a new module, both Feeder and Database, modelled on `gsheet_feeder_db`. It
   yields the one claimed job and writes results to Postgres, with its own retries, because the
-  orchestrator swallows `done()` errors. The job update and outbox entry share a transaction.
+  orchestrator swallows `done()` errors. The job update and sheet write share a transaction.
   `started()` writes nothing, because the claim has already added the status, but it must keep logging
   `STARTED`, as the timings use it. Archiving no longer touches Sheets, so a Sheets outage can't fail
   a row.
@@ -169,7 +169,7 @@ a heartbeat row. The supervisor runs on each worker VM.
   sync rule 1 relies on.
 - **Cleanup**: requeues jobs whose lease expired more than 2 minutes ago, with a 2-minute delay, and
   fails them after 3 attempts. The grace period lets supervisors renew after a Postgres restart.
-- **Alerts**: everything writes to an `alerts` table, read by the daily digest. Urgent ones also go by
+- **Alerts**: everything writes to an `admin_alerts` table, read by the daily digest. Urgent ones also go by
   email. This must be in place before the first busy sheet.
 
 The child needs no new orchestrator arguments, because the existing parser handles module settings:
@@ -243,21 +243,21 @@ the row it has just re-read.
 Each cycle takes `snapshot_at` from the database before reading the sheet, so clocks can't disagree.
 An entry is unwritten if both `written_at` and `discarded_at` are null.
 
-1. Blank status, no active job, no unwritten outbox entry and no outbox entry for the row written at
+1. Blank status, no active job, no unwritten sheet write and no sheet write for the row written at
    or after `snapshot_at`: add a job. The last check stops a result written during the read from
    being archived twice.
 2. Blank status with an active job or an unwritten entry: do nothing. Without this rule, a finished
    job whose result hasn't reached the sheet would be archived twice.
-3. `Queued` or `Archive in progress` with no active job, no unwritten entry and no outbox entry written
+3. `Queued` or `Archive in progress` with no active job, no unwritten entry and no sheet write written
    at or after `snapshot_at`: raise an alert, at most once a day per row, because the sheet and queue
    disagree.
 4. Any other status: do nothing.
-5. A queued job whose row URL has changed or gone is cancelled, and an outbox entry clears `Queued`
+5. A queued job whose row URL has changed or gone is cancelled, and a sheet write clears `Queued`
    with `skip_url_check` set. The next cycle then adds the new URL.
 
 Keep the existing valid URL and `must_have_folder_name_for_archive_to_run` checks from
-`_process_rows`. A row that fails them gets a job with status `rejected` and an outbox entry for the
-warning, so every sheet write has a job. A job and its first outbox entry share a transaction.
+`_process_rows`. A row that fails them gets a job with status `rejected` and a sheet write for the
+warning, so every sheet write has a job. A job and its first sheet write share a transaction.
 
 Read only the link, status and folder columns, not whole tabs, because cells can hold 50,000
 characters.
@@ -268,7 +268,7 @@ Store the sheet's raw URL in `jobs.url`, not the sanitised one, as the writer co
 ### Sanity check before every write
 
 The writer re-reads the row and compares the URL with `jobs.url`, unless `skip_url_check` is set, and
-the status with `outbox.expected_status`. On a mismatch it writes nothing, sets `outbox.conflict` and
+the status with `sheet_writes.expected_status`. On a mismatch it writes nothing, sets `sheet_writes.conflict` and
 raises an alert. The results stay in Postgres, so nothing needs re-archiving. It does not search the
 sheet for the URL. Updates for one job go out strictly in order, so later ones wait behind a conflict.
 
@@ -325,7 +325,7 @@ CREATE INDEX claimable ON jobs (id) WHERE status = 'queued';
 CREATE INDEX running_by_sheet ON jobs (sheet_id) WHERE status = 'running';
 CREATE INDEX jobs_by_row ON jobs (sheet_id, row_number);
 
-CREATE TABLE outbox (
+CREATE TABLE sheet_writes (
     id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
     job_id bigint NOT NULL REFERENCES jobs,
     cells jsonb NOT NULL,
@@ -337,20 +337,8 @@ CREATE TABLE outbox (
     discarded_at timestamptz
 );
 
-CREATE INDEX outbox_by_job ON outbox (job_id);
-CREATE INDEX unwritten ON outbox (id) WHERE written_at IS NULL AND discarded_at IS NULL;
-
--- What sync would have queued in shadow mode. Separate, so it can't collide with one_active_job
-CREATE TABLE shadow_jobs (
-    id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
-    sheet_id bigint NOT NULL REFERENCES sheets,
-    row_number int NOT NULL,
-    url text NOT NULL,
-    added_at timestamptz NOT NULL DEFAULT now(),
-    closed_at timestamptz               -- the row stopped being blank, so cron picked it up
-);
-
-CREATE UNIQUE INDEX one_open_shadow_job ON shadow_jobs (sheet_id, row_number) WHERE closed_at IS NULL;
+CREATE INDEX sheet_writes_by_job ON sheet_writes (job_id);
+CREATE INDEX unwritten ON sheet_writes (id) WHERE written_at IS NULL AND discarded_at IS NULL;
 
 -- Folder ids shared between processes. See "Running rows at once"
 CREATE TABLE drive_folders (
@@ -360,7 +348,7 @@ CREATE TABLE drive_folders (
     PRIMARY KEY (parent_id, name)
 );
 
-CREATE TABLE alerts (
+CREATE TABLE admin_alerts (
     id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
     kind text NOT NULL,
     message text NOT NULL,
@@ -401,7 +389,7 @@ WHERE id = (
 A worker can only save results if its `lease_token` still matches, so a worker that has been
 replaced can't overwrite the newer result.
 
-The first claim adds the `Archive in progress` outbox entry in the same transaction. A later claim of
+The first claim adds the `Archive in progress` sheet write in the same transaction. A later claim of
 the same job adds none. It checks for an existing entry rather than `attempts`, because a setup failure
 gives its attempt back.
 
@@ -451,10 +439,9 @@ if one VM runs jobs at once, which it doesn't: each VM runs one job at a time.
 
 ## Rollout
 
-1. **Shadow mode**: the sync records what it would queue in `shadow_jobs` and changes nothing. It
-   connects to Google with read-only scopes, so it can't write to a sheet. `register` adds a config's
-   tabs, switched off. `closed_at - added_at` gives the real wait for each row under cron, to within a
-   cycle. A row cron picks up between two cycles is never seen, so short waits are undercounted.
+1. **Register**: `register` adds a config's tabs, switched off, and sync doesn't read a tab that's off.
+   Sync connects to Google with read-only scopes, so it can't write to a sheet. (A shadow mode, which
+   recorded what sync would queue on tabs that were off, was dropped in migration 006 as not needed.)
 2. **Small sheet**: move one small spreadsheet, with all its tabs, because a cron config covers a whole
    spreadsheet. `sheets.enabled` is the switch for whether cron or the queue owns a sheet. Never both.
 3. **Busy sheets**: move larger ones in turn, keeping to 5 VMs until stable.
@@ -466,7 +453,7 @@ if one VM runs jobs at once, which it doesn't: each VM runs one job at a time.
 
 **Moving a spreadsheet** (`python -m auto_archiver.job_queue.sync ...`):
 
-1. Coordinator and a supervisor running, with the sheet in shadow mode showing the expected rows.
+1. Coordinator and a supervisor running, with the sheet registered.
 2. Turn the spreadsheet's cron line off, and wait for the cron run to finish.
 3. Check no row still says `Archive in progress`. A killed cron run can leave one, and only the old
    feeder relabels those. Blank it for a rerun, or set it to a final status.
@@ -521,9 +508,9 @@ Image rating later becomes a separate low-priority task. At about 170 s per imag
 2. Build in this order, with tests at each step:
    1. Done: the schema and `db.py`, with claim, lease and race tests against a separate local test
       database. These tests skip if there is no test database.
-   2. Done: sync in shadow mode, which can run in production early, tested on a real sheet.
+   2. Done: sync in shadow mode, tested on a real sheet. Shadow mode was later dropped.
    3. Done, tested on a real sheet: the pure cell builder, split out of `done()`, the writer, and live
-      sync, which applies the same rules to `jobs` and `outbox` on tabs with `enabled` on.
+      sync, which applies the same rules to `jobs` and `sheet_writes` on tabs with `enabled` on.
    4. Done, normal run, kill and drain tested on a real sheet: `queue_feeder_db`, the supervisor with the failure rules,
       and the coordinator. Not in this step: sending alert emails, a service file for each VM (use
       `KillMode=mixed`, so stopping it drains rather than kills the children), and the fixes in

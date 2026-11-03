@@ -34,7 +34,7 @@ def test_builds_every_cell_without_a_sheet(mocker):
     assert cells["screenshot"] == "http://example.com/s.png"
     assert cells["wacz"] == "http://example.com/a.wacz"
     assert "replayweb.page" in cells["replaywebpage"]
-    json.dumps(cells)  # they go in the outbox as jsonb
+    json.dumps(cells)  # they go in sheet_writes as jsonb
 
 
 def test_cached_notes_and_failed_uploads_go_in_the_status():

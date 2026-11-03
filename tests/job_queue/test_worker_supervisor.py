@@ -89,13 +89,13 @@ def job(conn, job_id) -> dict:
 
 
 def last_cells(conn, job_id) -> dict:
-    return conn.execute("SELECT cells FROM outbox WHERE job_id = %s ORDER BY id DESC LIMIT 1", (job_id,)).fetchone()[
-        "cells"
-    ]
+    return conn.execute(
+        "SELECT cells FROM sheet_writes WHERE job_id = %s ORDER BY id DESC LIMIT 1", (job_id,)
+    ).fetchone()["cells"]
 
 
 def alert_kinds(conn) -> list[str]:
-    return [a["kind"] for a in conn.execute("SELECT kind FROM alerts ORDER BY id").fetchall()]
+    return [a["kind"] for a in conn.execute("SELECT kind FROM admin_alerts ORDER BY id").fetchall()]
 
 
 # claiming and renewing

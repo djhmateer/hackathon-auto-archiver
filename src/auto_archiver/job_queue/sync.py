@@ -1,9 +1,8 @@
 """
 Sheet sync: reads the sheets and works out which rows need a job. See queue-spec.md
 
-decide() holds the sync rules with no network or database. They run in one of two ways, set per tab by sheets.enabled:
-- off: shadow mode, which records what would be queued in shadow_jobs, as cron still owns the tab
-- on: live, which adds jobs and outbox entries, as the queue owns the tab
+decide() holds the sync rules with no network or database. They run on each tab with sheets.enabled on, adding jobs
+and sheet writes, as the queue owns the tab. A tab that's off isn't read, as cron still owns it.
 
 Sync only ever connects to Google read-only. The sheet writer is the only part that writes to a sheet.
 
@@ -263,37 +262,10 @@ def register(conn, config_path: str, opener=open_spreadsheet) -> int:
     return len(tabs)
 
 
-def shadow_tab(conn, sheet_id: int, rows: list[Row], spreadsheet_name: str, tab_title: str, settings: dict) -> None:
-    """
-    Records what would be queued. An open shadow job stands in for a queued job. It closes when cron picks the row up,
-    giving a real wait time for that row. Cancelling closes it too. Rejects and alerts are dropped, as cron still owns
-    these rows and its 'Archive in progress' is normal
-    """
-    open_jobs = {job["row_number"]: job for job in db.get_open_shadow_jobs(conn, sheet_id)}
-    by_number = {row.number: row for row in rows}
-
-    for number, job in list(open_jobs.items()):
-        row = by_number.get(number)
-        if row is not None and row.status not in ("", None):
-            db.close_shadow_job(conn, job["id"])
-            del open_jobs[number]
-
-    states = {
-        number: RowState(job_id=job["id"], job_status="queued", job_url=job["url"]) for number, job in open_jobs.items()
-    }
-    for action in decide(
-        rows, states, spreadsheet_name, tab_title, settings["use_sheet_names"], settings["must_have_folder"]
-    ):
-        if action.kind == ADD:
-            db.add_shadow_job(conn, sheet_id, action.row, action.url)
-        elif action.kind == CANCEL:
-            db.close_shadow_job(conn, action.job_id)
-
-
 def live_tab(
     conn, sheet_id: int, rows: list[Row], snapshot_at, spreadsheet_name: str, tab_title: str, settings: dict
 ) -> None:
-    """Applies the rules for a tab the queue owns. Only adds jobs and outbox entries: the writer updates the sheet"""
+    """Applies the rules for a tab the queue owns. Only adds jobs and sheet writes: the writer updates the sheet"""
     states = {
         state["row_number"]: RowState(
             state["job_id"],
@@ -348,26 +320,18 @@ def sync_cycle(conn, opener=open_spreadsheet) -> None:
                 for sheet in db.get_sheets(conn)
                 if sheet["spreadsheet_id"] == spreadsheet_id and sheet["config"] == config_path
             }
-            tabs = [tab for tab in tabs if tab.id in sheets]
+            # a tab that's off isn't read, as cron still owns it
+            tabs = [tab for tab in tabs if tab.id in sheets and sheets[tab.id]["enabled"]]
             for gid, rows in read_tabs(spreadsheet, tabs, settings).items():
                 sheet = sheets[gid]
                 title, name = sheet["worksheet"], settings["sheet"] or spreadsheet.title
                 blank = sum(row.status in ("", None) for row in rows)
-                if sheet["enabled"]:
-                    live_tab(conn, sheet["id"], rows, snapshot_at, name, title, settings)
-                    log_on_change(
-                        gid,
-                        f"{db.describe_tab(spreadsheet.title, title)} (live): {len(rows)} row(s) with a URL, "
-                        f"{blank} blank status",
-                    )
-                else:
-                    shadow_tab(conn, sheet["id"], rows, name, title, settings)
-                    still_open = len(db.get_open_shadow_jobs(conn, sheet["id"]))
-                    log_on_change(
-                        gid,
-                        f"{db.describe_tab(spreadsheet.title, title)} (shadow): {len(rows)} row(s) with a URL, "
-                        f"{blank} blank status, {still_open} open",
-                    )
+                live_tab(conn, sheet["id"], rows, snapshot_at, name, title, settings)
+                log_on_change(
+                    gid,
+                    f"{db.describe_tab(spreadsheet.title, title)} (live): {len(rows)} row(s) with a URL, "
+                    f"{blank} blank status",
+                )
         except Exception as e:
             logger.error(f"Sync of config {config_path} failed: {e}")
     db.beat(conn, "sync")
@@ -378,7 +342,7 @@ def main() -> None:
     commands = parser.add_subparsers(dest="command", required=True)
     register_parser = commands.add_parser("register", help="add a config's tabs, all off")
     register_parser.add_argument("configs", nargs="+")
-    run_parser = commands.add_parser("run", help="sync every registered tab: shadow if it's off, live if it's on")
+    run_parser = commands.add_parser("run", help="sync every registered tab that's on")
     run_parser.add_argument("--once", action="store_true", help="one pass, then exit")
     for command, help_text in (
         ("enable", "move all of a spreadsheet's tabs to the queue. Turn its cron line off first"),

@@ -3,6 +3,7 @@ queue_feeder_db, then the supervisor running the real archiver as a real child p
 The child uses a throwaway extractor that makes no network calls, and no cookies, sessions or real sites are involved.
 """
 
+import hashlib
 import time
 
 import psycopg
@@ -62,10 +63,10 @@ def test_yields_nothing_with_a_stale_token(conn, module):
 def test_started_logs_the_line_the_timings_use_and_writes_nothing(conn, module, caplog):
     job = add_claimed_job(conn, module)
     list(module)
-    entries = len(conn.execute("SELECT * FROM outbox WHERE job_id = %s", (job["id"],)).fetchall())
+    entries = len(conn.execute("SELECT * FROM sheet_writes WHERE job_id = %s", (job["id"],)).fetchall())
     module.started(Metadata().set_url(URL))
     assert "STARTED" in caplog.text
-    assert len(conn.execute("SELECT * FROM outbox WHERE job_id = %s", (job["id"],)).fetchall()) == entries
+    assert len(conn.execute("SELECT * FROM sheet_writes WHERE job_id = %s", (job["id"],)).fetchall()) == entries
 
 
 def test_done_saves_the_result_cells(conn, module, caplog):
@@ -76,7 +77,7 @@ def test_done_saves_the_result_cells(conn, module, caplog):
     module.done(item)
     assert "DONE" in caplog.text
     assert db.get_job(conn, job["id"])["status"] == "done"
-    cells = conn.execute("SELECT cells FROM outbox ORDER BY id DESC LIMIT 1").fetchone()["cells"]
+    cells = conn.execute("SELECT cells FROM sheet_writes ORDER BY id DESC LIMIT 1").fetchone()["cells"]
     assert cells["status"] == "my-archiver: success"
     assert cells["title"] == "A title"
 
@@ -113,6 +114,18 @@ def test_done_saves_the_stats_and_each_file(conn, module, tmp_path):
     assert files[1]["hash"].startswith("SHA-256:") and files[1]["duration_seconds"] is None
 
 
+def test_a_missed_file_gets_the_enrichers_algorithm_and_a_wacz_its_mimetype(tmp_path):
+    video, wacz = tmp_path / "video.mp4", tmp_path / "crawl.wacz"
+    video.write_bytes(b"v")
+    wacz.write_bytes(b"w")
+    item = Metadata().set_url(URL)
+    item.add_media(Media(str(video)).set("hash", "SHA3-512:abc"))
+    item.add_media(Media(str(wacz)), id="browsertrix")
+    files = queue_feeder_db.describe_files(item)
+    assert files[1]["mimetype"] == "application/wacz"
+    assert files[1]["hash"] == f"SHA3-512:{hashlib.sha3_512(b'w').hexdigest()}"
+
+
 def test_done_still_saves_the_result_if_the_stats_fail(conn, module, mocker):
     job = add_claimed_job(conn, module)
     list(module)
@@ -127,7 +140,7 @@ def test_failed_saves_the_reason(conn, module):
     module.failed(Metadata().set_url(URL), "- a reason")
     current = db.get_job(conn, job["id"])
     assert (current["status"], current["error"]) == ("failed", "- a reason")
-    cells = conn.execute("SELECT cells FROM outbox ORDER BY id DESC LIMIT 1").fetchone()["cells"]
+    cells = conn.execute("SELECT cells FROM sheet_writes ORDER BY id DESC LIMIT 1").fetchone()["cells"]
     assert cells["status"] == "Archive failed - a reason"
     assert "date" in cells
 
@@ -270,7 +283,7 @@ def test_real_child_archives_a_job_end_to_end(conn, run_for_real, tmp_path):
     current = db.get_job(conn, job_id)
     assert current["status"] == "done", (tmp_path / "logs" / "last-job-console.log").read_text()[-3000:]
     assert current["work_started_at"] is not None
-    cells = conn.execute("SELECT cells FROM outbox ORDER BY id DESC LIMIT 1").fetchone()["cells"]
+    cells = conn.execute("SELECT cells FROM sheet_writes ORDER BY id DESC LIMIT 1").fetchone()["cells"]
     assert cells["status"] == "fake_extractor: success"
     assert cells["title"] == "A fake title"
 
@@ -292,7 +305,7 @@ def test_real_child_with_a_failing_row_reports_it(conn, run_for_real):
     _, (job_id,) = run_for_real(["https://example.com/fail"])
     # the extractor's error is caught by the orchestrator, so the row ends as nothing archived, as under cron
     assert db.get_job(conn, job_id)["status"] == "done"
-    cells = conn.execute("SELECT cells FROM outbox ORDER BY id DESC LIMIT 1").fetchone()["cells"]
+    cells = conn.execute("SELECT cells FROM sheet_writes ORDER BY id DESC LIMIT 1").fetchone()["cells"]
     assert "success" not in cells["status"]
 
 

@@ -39,7 +39,7 @@ Run the script as your normal user, not root. It's safe to run again. It doesn't
 
 1. Copy each sheet's config and service account into `secrets/` with FileZilla.
 2. Open port 5432 to the workers, if anything between them blocks it.
-3. Register the sheets, which start in shadow mode, so they're only read:
+3. Register the sheets. They start off, so sync doesn't read them until you move them to the queue:
 
    ```bash
    poetry run python -m auto_archiver.job_queue.sync register secrets/<config>.yaml
@@ -86,7 +86,7 @@ Add the new worker's SSH port to `PORTS` at the top of `scripts/job_queue/deploy
 
 ## Move a spreadsheet from cron to the queue
 
-1. Check the shadow mode row counts look right in the coordinator's logs.
+1. Register it, if it isn't already. See "Deploy a new coordinator VM".
 2. Turn off the spreadsheet's cron line, and wait for the cron run to finish.
 3. Check no row still says `Archive in progress`. Blank it for a rerun, or set it to a final status.
 4. Turn it on. All its tabs move, and any tabs added later start on:
@@ -118,7 +118,7 @@ bash scripts/job_queue/deploy-coordinator.sh --reset-except-sheets   # the same,
 
 It stops at the first step that fails, which leaves the coordinator stopped.
 
-After migrating, `--reset-except-sheets` empties `job_files`, `outbox`, `jobs`, `shadow_jobs`, `drive_folders`, `alerts` and `heartbeats`, and restarts their ids from 1. It keeps `sheets`, which includes each sheet's enabled/shadow setting, and `schema_migrations`. Before you use it:
+After migrating, `--reset-except-sheets` empties `job_files`, `sheet_writes`, `jobs`, `drive_folders`, `admin_alerts` and `heartbeats`, and restarts their ids from 1. It keeps `sheets`, which includes whether each sheet is on, and `schema_migrations`. Before you use it:
 
 - Stop the workers first. A job that's running when you reset can't write back its result once its row has gone.
 - The next sync queues again every row whose status is blank.
@@ -168,7 +168,7 @@ j                                          # journalctl -u aa-worker-supervisor 
 Each job a worker finishes saves its stats, for a dashboard. Jobs finished before migration 003, or by a worker on older code, have none. Times are UTC.
 
 - `jobs`, besides the sheet, row, folder, worker and timings it already had: `title`, `archive_url`, `extractor` (eg `vimeo`), `posted_at` (when the original was posted), `cached`, `store_failures` (files that didn't upload) and the worker's `git_commit`. The archive took `finished_at - work_started_at`, and waited `started_at - added_at` in the queue.
-- `job_files`: one row per stored file for each attempt, so a retry's files count too. Each has its `role` (eg `browsertrix`, `metadata_json`, blank for the main media), `key`, `url`, `mimetype`, `bytes`, `hash` and `duration_seconds`.
+- `job_files`: one row per stored file for each attempt, so a retry's files count too. Each has its `role` (eg `browsertrix`, `metadata_json`, blank for the main media), `key`, `url`, `mimetype` (`application/wacz` for a WACZ), `bytes`, `hash` and `duration_seconds`. Every file in an archive is hashed with the hash enricher's algorithm, eg `SHA3-512:…`, including files it didn't cover, such as screenshots and the WACZ. `posted_at` and `duration_seconds` are empty when the extractor didn't find them.
 - `sheets.client`: who the sheet is for. Set it by hand.
 
 If the stats can't be worked out, the result is saved without them, and the archiver logs `Couldn't work out the archive's stats`.
@@ -195,7 +195,7 @@ $Q "SELECT s.client, count(DISTINCT j.id) AS archives, pg_size_pretty(sum(f.byte
 
 ## Add a migration
 
-Add the next numbered file to `src/auto_archiver/job_queue/migrations/`, such as `004_add_something.sql`, and run `migrate`. Never edit a file that's already been applied.
+Add the next numbered file to `src/auto_archiver/job_queue/migrations/`, such as `007_add_something.sql`, and run `migrate`. Never edit a file that's already been applied.
 
 The coordinator won't start if a migration isn't applied, an applied file has been edited, or the database has a migration its code doesn't.
 
@@ -208,7 +208,7 @@ Q="psql -h localhost -U bob -d auto_archiver -c"
 $Q "SELECT status, count(*) FROM jobs GROUP BY status"
 $Q "SELECT id, row_number, status, attempts, worker, error FROM jobs ORDER BY id DESC LIMIT 20"
 $Q "SELECT name, beat_at FROM heartbeats"
-$Q "SELECT kind, message, created_at FROM alerts ORDER BY id DESC LIMIT 20"
+$Q "SELECT kind, message, created_at FROM admin_alerts ORDER BY id DESC LIMIT 20"
 ```
 
 Alerts aren't emailed yet, so check them by hand. A sheet write that hit a conflict waits for you:

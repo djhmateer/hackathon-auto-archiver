@@ -1,13 +1,13 @@
 """
-Sheet writer: sends the outbox to the sheets, and is the only part that writes to them. See queue-spec.md
+Sheet writer: sends the waiting sheet writes to the sheets, and is the only part that writes to them. See queue-spec.md
 
 Before each write it re-reads the row. If the URL or status isn't what's expected it writes nothing and records a
 conflict, as a client may have changed the sheet. The results stay in Postgres, so nothing needs archiving again.
 
     python -m auto_archiver.job_queue.writer run [--once]
     python -m auto_archiver.job_queue.writer conflicts
-    python -m auto_archiver.job_queue.writer retry <outbox id>
-    python -m auto_archiver.job_queue.writer discard <outbox id>
+    python -m auto_archiver.job_queue.writer retry <sheet write id>
+    python -m auto_archiver.job_queue.writer discard <sheet write id>
 """
 
 import argparse
@@ -156,7 +156,7 @@ def _write_spreadsheet(conn, spreadsheet_id: str, config_path: str, entries: lis
 def writer_pass(conn, opener=open_for_writing) -> int:
     """Each job's next entry. A failure only loses that spreadsheet's turn, and it's tried again next time"""
     by_spreadsheet = {}
-    for entry in db.get_next_outbox_entries(conn):
+    for entry in db.get_next_sheet_writes(conn):
         by_spreadsheet.setdefault((entry["spreadsheet_id"], entry["config"]), []).append(entry)
 
     written = 0
@@ -182,11 +182,11 @@ def writer_cycle(conn, opener=open_for_writing) -> int:
 def main() -> None:
     parser = argparse.ArgumentParser(description="Sheet writer for the job queue")
     commands = parser.add_subparsers(dest="command", required=True)
-    run_parser = commands.add_parser("run", help="send the outbox to the sheets")
+    run_parser = commands.add_parser("run", help="send the waiting sheet writes to the sheets")
     run_parser.add_argument("--once", action="store_true", help="one cycle, then exit")
     commands.add_parser("conflicts", help="list the entries waiting on a conflict")
-    commands.add_parser("retry", help="check a conflicted entry again").add_argument("outbox_id", type=int)
-    commands.add_parser("discard", help="give up on a conflicted entry").add_argument("outbox_id", type=int)
+    commands.add_parser("retry", help="check a conflicted entry again").add_argument("write_id", type=int)
+    commands.add_parser("discard", help="give up on a conflicted entry").add_argument("write_id", type=int)
     args = parser.parse_args()
 
     if args.command == "conflicts":
@@ -197,14 +197,14 @@ def main() -> None:
     if args.command in ("retry", "discard"):
         action = db.retry_conflict if args.command == "retry" else db.discard_conflict
         with db.connect() as conn:
-            print("Done" if action(conn, args.outbox_id) else f"No conflict on entry {args.outbox_id}")
+            print("Done" if action(conn, args.write_id) else f"No conflict on entry {args.write_id}")
         return
 
     while True:
         # a new connection each time, so a Postgres restart only loses one cycle
         try:
             with db.connect() as conn:
-                logger.info(f"Wrote {writer_cycle(conn)} outbox entries")
+                logger.info(f"Wrote {writer_cycle(conn)} sheet writes")
         except Exception as e:
             logger.error(f"Writer failed: {e}")
         if args.once:

@@ -46,7 +46,9 @@ def database_url(env_file: Path = ENV_FILE) -> str:
 
 def get_last_cells(conn: psycopg.Connection, job_id: int) -> dict:
     """The cells of the job's last sheet update, eg its result"""
-    row = conn.execute("SELECT cells FROM outbox WHERE job_id = %s ORDER BY id DESC LIMIT 1", (job_id,)).fetchone()
+    row = conn.execute(
+        "SELECT cells FROM sheet_writes WHERE job_id = %s ORDER BY id DESC LIMIT 1", (job_id,)
+    ).fetchone()
     return row["cells"] if row else {}
 
 
@@ -72,17 +74,17 @@ def connect(url: str = None) -> psycopg.Connection:
 
 
 def add_alert(conn: psycopg.Connection, kind: str, message: str) -> None:
-    conn.execute("INSERT INTO alerts (kind, message) VALUES (%s, %s)", (kind, message))
+    conn.execute("INSERT INTO admin_alerts (kind, message) VALUES (%s, %s)", (kind, message))
 
 
 def add_alert_once(conn: psycopg.Connection, kind: str, message: str) -> None:
     """For something checked every cycle: at most one alert a day for the same thing"""
     conn.execute(
         """
-        INSERT INTO alerts (kind, message)
+        INSERT INTO admin_alerts (kind, message)
         SELECT %(kind)s, %(message)s
         WHERE NOT EXISTS (
-            SELECT 1 FROM alerts WHERE kind = %(kind)s AND message = %(message)s
+            SELECT 1 FROM admin_alerts WHERE kind = %(kind)s AND message = %(message)s
                 AND created_at > now() - interval '1 day'
         )
         """,
@@ -164,8 +166,8 @@ def rollback_spreadsheet(conn: psycopg.Connection, spreadsheet_id: str) -> tuple
     ).fetchone()["n"]
     unwritten = conn.execute(
         """
-        SELECT count(*) AS n FROM outbox o JOIN jobs j ON j.id = o.job_id JOIN sheets s ON s.id = j.sheet_id
-        WHERE s.spreadsheet_id = %s AND o.written_at IS NULL AND o.discarded_at IS NULL
+        SELECT count(*) AS n FROM sheet_writes w JOIN jobs j ON j.id = w.job_id JOIN sheets s ON s.id = j.sheet_id
+        WHERE s.spreadsheet_id = %s AND w.written_at IS NULL AND w.discarded_at IS NULL
         """,
         (spreadsheet_id,),
     ).fetchone()["n"]
@@ -182,10 +184,10 @@ def get_queue_summary(conn: psycopg.Connection) -> dict:
         SELECT
             (SELECT count(*) FROM jobs WHERE status = 'queued') AS queued,
             (SELECT count(*) FROM jobs WHERE status = 'running') AS running,
-            (SELECT count(*) FROM outbox WHERE written_at IS NULL AND discarded_at IS NULL) AS unwritten,
-            (SELECT count(*) FROM outbox WHERE conflict IS NOT NULL
+            (SELECT count(*) FROM sheet_writes WHERE written_at IS NULL AND discarded_at IS NULL) AS unwritten,
+            (SELECT count(*) FROM sheet_writes WHERE conflict IS NOT NULL
                 AND written_at IS NULL AND discarded_at IS NULL) AS conflicts,
-            (SELECT count(*) FROM alerts WHERE sent_at IS NULL) AS unsent_alerts
+            (SELECT count(*) FROM admin_alerts WHERE sent_at IS NULL) AS unsent_alerts
         """
     ).fetchone()
 
@@ -234,26 +236,6 @@ def get_jobs_waiting_for_site(conn: psycopg.Connection) -> list[dict]:
     ).fetchall()
 
 
-def get_open_shadow_jobs(conn: psycopg.Connection, sheet_id: int) -> list[dict]:
-    return conn.execute(
-        "SELECT * FROM shadow_jobs WHERE sheet_id = %s AND closed_at IS NULL ORDER BY id", (sheet_id,)
-    ).fetchall()
-
-
-def add_shadow_job(conn: psycopg.Connection, sheet_id: int, row_number: int, url: str) -> None:
-    conn.execute(
-        """
-        INSERT INTO shadow_jobs (sheet_id, row_number, url) VALUES (%s, %s, %s)
-        ON CONFLICT (sheet_id, row_number) WHERE closed_at IS NULL DO NOTHING
-        """,
-        (sheet_id, row_number, url),
-    )
-
-
-def close_shadow_job(conn: psycopg.Connection, shadow_job_id: int) -> None:
-    conn.execute("UPDATE shadow_jobs SET closed_at = now() WHERE id = %s", (shadow_job_id,))
-
-
 def add_job(
     conn: psycopg.Connection,
     sheet_id: int,
@@ -276,7 +258,7 @@ def add_job(
         if job is None:
             return None
         conn.execute(
-            "INSERT INTO outbox (job_id, cells, expected_status) VALUES (%s, %s, '')",
+            "INSERT INTO sheet_writes (job_id, cells, expected_status) VALUES (%s, %s, '')",
             (job["id"], Jsonb({"status": STATUS_QUEUED})),
         )
     return job["id"]
@@ -293,7 +275,7 @@ def add_rejected_job(conn: psycopg.Connection, sheet_id: int, row_number: int, u
             (sheet_id, row_number, url, message),
         ).fetchone()
         conn.execute(
-            "INSERT INTO outbox (job_id, cells, expected_status) VALUES (%s, %s, '')",
+            "INSERT INTO sheet_writes (job_id, cells, expected_status) VALUES (%s, %s, '')",
             (job["id"], Jsonb({"status": message})),
         )
 
@@ -309,11 +291,11 @@ def cancel_job(conn: psycopg.Connection, job_id: int) -> bool:
             return False
         # a job requeued after being claimed has the in progress status on its row by now
         claimed = conn.execute(
-            "SELECT 1 FROM outbox WHERE job_id = %s AND expected_status = %s", (job_id, STATUS_QUEUED)
+            "SELECT 1 FROM sheet_writes WHERE job_id = %s AND expected_status = %s", (job_id, STATUS_QUEUED)
         ).fetchone()
         # skips the URL check, which fails by definition when the URL has changed
         conn.execute(
-            "INSERT INTO outbox (job_id, cells, expected_status, skip_url_check) VALUES (%s, %s, %s, true)",
+            "INSERT INTO sheet_writes (job_id, cells, expected_status, skip_url_check) VALUES (%s, %s, %s, true)",
             (job_id, Jsonb({"status": ""}), STATUS_IN_PROGRESS if claimed else STATUS_QUEUED),
         )
     return True
@@ -327,14 +309,14 @@ def get_row_states(conn: psycopg.Connection, sheet_id: int, snapshot_at) -> list
             max(j.id) FILTER (WHERE j.status IN ('queued', 'running')) AS job_id,
             max(j.status) FILTER (WHERE j.status IN ('queued', 'running')) AS job_status,
             max(j.url) FILTER (WHERE j.status IN ('queued', 'running')) AS job_url,
-            COALESCE(bool_or(o.id IS NOT NULL AND o.written_at IS NULL AND o.discarded_at IS NULL), false)
+            COALESCE(bool_or(w.id IS NOT NULL AND w.written_at IS NULL AND w.discarded_at IS NULL), false)
                 AS has_unwritten,
-            COALESCE(bool_or(o.written_at >= %(snapshot_at)s), false) AS written_since_snapshot
-        FROM jobs j LEFT JOIN outbox o ON o.job_id = j.id
+            COALESCE(bool_or(w.written_at >= %(snapshot_at)s), false) AS written_since_snapshot
+        FROM jobs j LEFT JOIN sheet_writes w ON w.job_id = j.id
         WHERE j.sheet_id = %(sheet_id)s AND (
             j.status IN ('queued', 'running')
-            OR (o.id IS NOT NULL AND o.written_at IS NULL AND o.discarded_at IS NULL)
-            OR o.written_at >= %(snapshot_at)s
+            OR (w.id IS NOT NULL AND w.written_at IS NULL AND w.discarded_at IS NULL)
+            OR w.written_at >= %(snapshot_at)s
         )
         GROUP BY j.row_number
         """,
@@ -342,16 +324,16 @@ def get_row_states(conn: psycopg.Connection, sheet_id: int, snapshot_at) -> list
     ).fetchall()
 
 
-def get_next_outbox_entries(conn: psycopg.Connection) -> list[dict]:
+def get_next_sheet_writes(conn: psycopg.Connection) -> list[dict]:
     """The oldest unwritten entry of each job. A job whose oldest has a conflict waits, so updates stay in order"""
     return conn.execute(
         """
         SELECT * FROM (
-            SELECT DISTINCT ON (o.job_id) o.id, o.job_id, o.cells, o.expected_status, o.skip_url_check, o.conflict,
+            SELECT DISTINCT ON (w.job_id) w.id, w.job_id, w.cells, w.expected_status, w.skip_url_check, w.conflict,
                 j.row_number, j.url, s.id AS sheet_id, s.spreadsheet_id, s.worksheet_gid, s.config
-            FROM outbox o JOIN jobs j ON j.id = o.job_id JOIN sheets s ON s.id = j.sheet_id
-            WHERE o.written_at IS NULL AND o.discarded_at IS NULL
-            ORDER BY o.job_id, o.id
+            FROM sheet_writes w JOIN jobs j ON j.id = w.job_id JOIN sheets s ON s.id = j.sheet_id
+            WHERE w.written_at IS NULL AND w.discarded_at IS NULL
+            ORDER BY w.job_id, w.id
         ) next_entries
         WHERE conflict IS NULL
         ORDER BY id
@@ -359,42 +341,42 @@ def get_next_outbox_entries(conn: psycopg.Connection) -> list[dict]:
     ).fetchall()
 
 
-def mark_written(conn: psycopg.Connection, outbox_ids: list[int]) -> None:
+def mark_written(conn: psycopg.Connection, write_ids: list[int]) -> None:
     """Only once the sheet has been updated, as sync rule 1 relies on that"""
-    conn.execute("UPDATE outbox SET written_at = now() WHERE id = ANY(%s)", (outbox_ids,))
+    conn.execute("UPDATE sheet_writes SET written_at = now() WHERE id = ANY(%s)", (write_ids,))
 
 
-def set_conflict(conn: psycopg.Connection, outbox_id: int, conflict: str) -> None:
+def set_conflict(conn: psycopg.Connection, write_id: int, conflict: str) -> None:
     with conn.transaction():
-        conn.execute("UPDATE outbox SET conflict = %s WHERE id = %s", (conflict, outbox_id))
-        add_alert(conn, "writer_conflict", f"Outbox entry {outbox_id}: {conflict}")
+        conn.execute("UPDATE sheet_writes SET conflict = %s WHERE id = %s", (conflict, write_id))
+        add_alert(conn, "writer_conflict", f"Sheet write {write_id}: {conflict}")
 
 
 def get_conflicts(conn: psycopg.Connection) -> list[dict]:
     return conn.execute(
         """
-        SELECT o.id, o.job_id, j.sheet_id, j.row_number, o.conflict, o.created_at
-        FROM outbox o JOIN jobs j ON j.id = o.job_id
-        WHERE o.conflict IS NOT NULL AND o.written_at IS NULL AND o.discarded_at IS NULL
-        ORDER BY o.id
+        SELECT w.id, w.job_id, j.sheet_id, j.row_number, w.conflict, w.created_at
+        FROM sheet_writes w JOIN jobs j ON j.id = w.job_id
+        WHERE w.conflict IS NOT NULL AND w.written_at IS NULL AND w.discarded_at IS NULL
+        ORDER BY w.id
         """
     ).fetchall()
 
 
-def retry_conflict(conn: psycopg.Connection, outbox_id: int) -> bool:
+def retry_conflict(conn: psycopg.Connection, write_id: int) -> bool:
     result = conn.execute(
-        "UPDATE outbox SET conflict = NULL WHERE id = %s AND conflict IS NOT NULL AND written_at IS NULL "
+        "UPDATE sheet_writes SET conflict = NULL WHERE id = %s AND conflict IS NOT NULL AND written_at IS NULL "
         "AND discarded_at IS NULL",
-        (outbox_id,),
+        (write_id,),
     )
     return result.rowcount == 1
 
 
-def discard_conflict(conn: psycopg.Connection, outbox_id: int) -> bool:
+def discard_conflict(conn: psycopg.Connection, write_id: int) -> bool:
     result = conn.execute(
-        "UPDATE outbox SET discarded_at = now() WHERE id = %s AND conflict IS NOT NULL AND written_at IS NULL "
+        "UPDATE sheet_writes SET discarded_at = now() WHERE id = %s AND conflict IS NOT NULL AND written_at IS NULL "
         "AND discarded_at IS NULL",
-        (outbox_id,),
+        (write_id,),
     )
     return result.rowcount == 1
 
@@ -415,7 +397,7 @@ def claim_job(conn: psycopg.Connection, worker: str, git_commit: str = None) -> 
     Skips a job whose domain (its site, eg vimeo.com) already has a job running, so no site gets more than one at a
     time. The lock makes claims take turns, or two workers could each see the site free and both claim it.
 
-    Only the job's first claim adds the in progress status. That's found from the outbox rather than attempts, because
+    Only the job's first claim adds the in progress status. That's found from its sheet writes rather than attempts, because
     a setup failure gives its attempt back.
     """
     with conn.transaction():
@@ -444,9 +426,9 @@ def claim_job(conn: psycopg.Connection, worker: str, git_commit: str = None) -> 
             return None
         conn.execute(
             """
-            INSERT INTO outbox (job_id, cells, expected_status)
+            INSERT INTO sheet_writes (job_id, cells, expected_status)
             SELECT %(id)s, %(cells)s, %(queued)s
-            WHERE NOT EXISTS (SELECT 1 FROM outbox WHERE job_id = %(id)s AND expected_status = %(queued)s)
+            WHERE NOT EXISTS (SELECT 1 FROM sheet_writes WHERE job_id = %(id)s AND expected_status = %(queued)s)
             """,
             {"id": job["id"], "cells": Jsonb({"status": in_progress_status(worker)}), "queued": STATUS_QUEUED},
         )
@@ -532,7 +514,7 @@ def finish_job(
         if job is None:
             return False
         conn.execute(
-            "INSERT INTO outbox (job_id, cells, expected_status) VALUES (%s, %s, %s)",
+            "INSERT INTO sheet_writes (job_id, cells, expected_status) VALUES (%s, %s, %s)",
             (job_id, Jsonb(cells), STATUS_IN_PROGRESS),
         )
         for file in files:
@@ -596,7 +578,7 @@ def requeue_expired(conn: psycopg.Connection) -> tuple[int, int]:
                 WHERE status = 'running' AND lease_until < now() - interval '2 minutes' AND attempts >= %s
                 RETURNING id
             )
-            INSERT INTO outbox (job_id, cells, expected_status)
+            INSERT INTO sheet_writes (job_id, cells, expected_status)
             SELECT id, %s, %s FROM failed
             """,
             (reason, MAX_ATTEMPTS, Jsonb(cells), STATUS_IN_PROGRESS),

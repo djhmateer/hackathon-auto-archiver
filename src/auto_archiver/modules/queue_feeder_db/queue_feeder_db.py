@@ -5,6 +5,7 @@ Opens a connection for each write rather than holding one for a row that can tak
 connection, as the orchestrator swallows errors from done() and the archive would otherwise be lost.
 """
 
+import hashlib
 import os
 import time
 from datetime import datetime, timezone
@@ -17,6 +18,11 @@ from auto_archiver.job_queue import db
 from auto_archiver.modules.gsheet_feeder_db.gsheet_feeder_db import build_result_cells
 from auto_archiver.utils.custom_logger import logger
 from auto_archiver.utils.misc import calculate_file_hash
+
+# the hash enricher's algorithms, so a file it missed gets the same one
+HASH_ALGORITHMS = {"SHA-256": hashlib.sha256, "SHA3-512": hashlib.sha3_512}
+# types Python's mimetypes doesn't know
+EXTRA_MIMETYPES = {".wacz": "application/wacz"}
 
 # about 5 minutes, long enough for a Postgres restart
 RETRY_DELAYS_SECONDS = (5, 15, 30, 60, 60, 60, 60)
@@ -38,15 +44,21 @@ def describe_result(item: Metadata, cells: dict, cached: bool) -> dict:
 def describe_files(item: Metadata) -> list[dict]:
     """
     Each stored file, as db.FILE_COLUMNS. Run in done(), while the files are still in the tmp dir. A file the hash
-    enricher missed (eg the html page, made after it) is hashed here
+    enricher missed (eg a screenshot or WACZ, made after it) is hashed here, with the algorithm it used
     """
+    all_media = item.get_all_media()
+    used = {(m.get("hash") or "").split(":")[0] for m in all_media} & HASH_ALGORITHMS.keys()
+    algorithm = "SHA3-512" if "SHA3-512" in used else "SHA-256"
     files = []
-    for media in item.get_all_media():
+    for media in all_media:
         size, file_hash = None, media.get("hash")
         if media.filename and os.path.isfile(media.filename):
             size = os.path.getsize(media.filename)
             if not file_hash:
-                file_hash = f"SHA-256:{calculate_file_hash(media.filename)}"
+                file_hash = f"{algorithm}:{calculate_file_hash(media.filename, HASH_ALGORITHMS[algorithm])}"
+        mimetype = None
+        if media.filename:
+            mimetype = media.mimetype or EXTRA_MIMETYPES.get(os.path.splitext(media.filename)[1].lower())
         try:
             duration = float(media.get("duration"))
         except (TypeError, ValueError):
@@ -56,7 +68,7 @@ def describe_files(item: Metadata) -> list[dict]:
                 "role": media.get("id") or "",
                 "key": media.key,
                 "url": media.urls[0] if media.urls else None,
-                "mimetype": (media.mimetype or None) if media.filename else None,
+                "mimetype": mimetype or None,
                 "bytes": size,
                 "hash": file_hash,
                 "duration_seconds": duration,

@@ -79,7 +79,7 @@ cat <<DONE
 Done. Still to do by hand:
   1. Copy each sheet's config and service account into $REPO/secrets/
   2. Open port 5432 to the workers, if anything between them blocks it
-  3. Register the sheets, which start in shadow mode:
+  3. Register the sheets, which start off, so they're not read:
        poetry run python -m auto_archiver.job_queue.sync register secrets/<config>.yaml
   4. Start it, and watch it:
        sudo systemctl start aa-coordinator
