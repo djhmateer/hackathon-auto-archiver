@@ -52,7 +52,7 @@ poetry run python -m auto_archiver.job_queue.migrate
 if [ "$RESET" = "1" ]; then
     echo "== Emptying every table except sheets"
     PGPASSWORD=password psql -h localhost -U bob -d auto_archiver -v ON_ERROR_STOP=1 -c \
-        "TRUNCATE outbox, jobs, shadow_jobs, drive_folders, alerts, heartbeats RESTART IDENTITY"
+        "TRUNCATE job_files, outbox, jobs, shadow_jobs, drive_folders, alerts, heartbeats RESTART IDENTITY"
 fi
 
 echo "== Starting aa-coordinator"

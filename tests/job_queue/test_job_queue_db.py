@@ -491,3 +491,19 @@ def test_no_env_file_says_what_to_do(tmp_path):
 def test_describe_database_leaves_out_the_password():
     described = db.describe_database("postgresql://user1:secret@203.0.113.7:5433/db1")
     assert described == "user1@203.0.113.7:5433/db1"
+
+
+def test_claim_saves_the_workers_git_commit(conn):
+    add_job(conn, add_sheet(conn))
+    assert db.claim_job(conn, "vm1", "abc1234")["git_commit"] == "abc1234"
+
+
+def test_a_retry_keeps_each_attempts_files(conn):
+    job_id = add_job(conn, add_sheet(conn))
+    files = [{"role": "", "key": "folder1/video.mp4", "bytes": 1000}]
+    for _ in range(2):
+        claimed = db.claim_job(conn, "vm1")
+        db.finish_job(conn, job_id, claimed["lease_token"], "done", {"status": "ok"}, files=files)
+        conn.execute("UPDATE jobs SET status = 'queued' WHERE id = %s", (job_id,))
+    rows = conn.execute("SELECT attempt, bytes FROM job_files WHERE job_id = %s ORDER BY id", (job_id,)).fetchall()
+    assert [(r["attempt"], r["bytes"]) for r in rows] == [(1, 1000), (2, 1000)]

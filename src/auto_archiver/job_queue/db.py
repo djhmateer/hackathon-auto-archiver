@@ -407,7 +407,7 @@ def count_active_jobs(conn: psycopg.Connection) -> dict:
     return {"queued": 0, "running": 0, **{row["status"]: row["n"] for row in rows}}
 
 
-def claim_job(conn: psycopg.Connection, worker: str) -> dict | None:
+def claim_job(conn: psycopg.Connection, worker: str, git_commit: str = None) -> dict | None:
     """
     Claims the next job, or returns None if there isn't one. The sheet with the fewest running jobs for its weight
     goes first, then the oldest job.
@@ -423,7 +423,7 @@ def claim_job(conn: psycopg.Connection, worker: str) -> dict | None:
         conn.execute("SELECT pg_advisory_xact_lock(%s)", (CLAIM_LOCK,))
         job = conn.execute(
             """
-            UPDATE jobs SET status = 'running', worker = %s, attempts = attempts + 1,
+            UPDATE jobs SET status = 'running', worker = %s, git_commit = %s, attempts = attempts + 1,
                 started_at = COALESCE(started_at, now()), work_started_at = NULL,
                 lease_token = gen_random_uuid(), lease_until = now() + interval '5 minutes'
             FROM sheets sheet
@@ -438,7 +438,7 @@ def claim_job(conn: psycopg.Connection, worker: str) -> dict | None:
             )
             RETURNING jobs.*, sheet.config, sheet.worksheet, sheet.spreadsheet_name
             """,
-            (worker,),
+            (worker, git_commit),
         ).fetchone()
         if job is None:
             return None
@@ -499,27 +499,50 @@ def mark_work_started(conn: psycopg.Connection, job_id: int, lease_token: str) -
     return True
 
 
+RESULT_COLUMNS = ("title", "archive_url", "extractor", "posted_at", "cached", "store_failures")
+FILE_COLUMNS = ("role", "key", "url", "mimetype", "bytes", "hash", "duration_seconds")
+
+
 def finish_job(
-    conn: psycopg.Connection, job_id: int, lease_token: str, status: str, cells: dict, error: str = None
+    conn: psycopg.Connection,
+    job_id: int,
+    lease_token: str,
+    status: str,
+    cells: dict,
+    error: str = None,
+    result: dict = None,
+    files: list[dict] = (),
 ) -> bool:
     """
-    Saves the result of a job, with status 'done' or 'failed', and its sheet update.
-    False means this worker no longer has the job, and nothing was saved
+    Saves the result of a job, with status 'done' or 'failed', and its sheet update. result has the RESULT_COLUMNS
+    and each of files the FILE_COLUMNS, for the dashboard. False means this worker no longer has the job, and nothing
+    was saved
     """
+    result = result or {}
     with conn.transaction():
-        result = conn.execute(
-            """
-            UPDATE jobs SET status = %s, finished_at = now(), lease_until = NULL, error = %s
+        job = conn.execute(
+            f"""
+            UPDATE jobs SET status = %s, finished_at = now(), lease_until = NULL, error = %s,
+                {", ".join(f"{column} = %s" for column in RESULT_COLUMNS)}
             WHERE id = %s AND lease_token = %s AND status = 'running'
+            RETURNING attempts
             """,
-            (status, error, job_id, lease_token),
-        )
-        if result.rowcount != 1:
+            (status, error, *(result.get(column) for column in RESULT_COLUMNS), job_id, lease_token),
+        ).fetchone()
+        if job is None:
             return False
         conn.execute(
             "INSERT INTO outbox (job_id, cells, expected_status) VALUES (%s, %s, %s)",
             (job_id, Jsonb(cells), STATUS_IN_PROGRESS),
         )
+        for file in files:
+            conn.execute(
+                f"""
+                INSERT INTO job_files (job_id, attempt, {", ".join(FILE_COLUMNS)})
+                VALUES (%s, %s, {", ".join(["%s"] * len(FILE_COLUMNS))})
+                """,
+                (job_id, job["attempts"], *(file.get(column) for column in FILE_COLUMNS)),
+            )
     return True
 
 

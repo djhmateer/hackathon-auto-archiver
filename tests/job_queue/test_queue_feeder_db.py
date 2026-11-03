@@ -8,7 +8,7 @@ import time
 import psycopg
 import pytest
 
-from auto_archiver.core import Metadata
+from auto_archiver.core import Media, Metadata
 from auto_archiver.job_queue import db
 from auto_archiver.job_queue.worker_supervisor import WorkerSupervisor, start_child
 from auto_archiver.modules.queue_feeder_db import queue_feeder_db
@@ -79,6 +79,46 @@ def test_done_saves_the_result_cells(conn, module, caplog):
     cells = conn.execute("SELECT cells FROM outbox ORDER BY id DESC LIMIT 1").fetchone()["cells"]
     assert cells["status"] == "my-archiver: success"
     assert cells["title"] == "A title"
+
+
+def test_done_saves_the_stats_and_each_file(conn, module, tmp_path):
+    job = add_claimed_job(conn, module)
+    list(module)
+    video, page = tmp_path / "video.mp4", tmp_path / "page.html"
+    video.write_bytes(b"v" * 1000)
+    page.write_bytes(b"<html></html>")
+    item = Metadata().set_url(URL).success("vimeo")
+    item.set_title("A title")
+    item.set_timestamp("2026-01-01T12:00:00")
+    stored = Media(str(video)).set("hash", "SHA-256:abc").set("duration", "61.5")
+    stored._key, stored.urls = "folder1/video.mp4", ["https://example.com/folder1/video.mp4"]
+    item.add_media(stored)
+    item.set_final_media(Media(str(page)))
+    module.done(item)
+
+    current = db.get_job(conn, job["id"])
+    assert (current["title"], current["extractor"], current["cached"], current["store_failures"]) == (
+        "A title",
+        "vimeo",
+        False,
+        0,
+    )
+    assert current["posted_at"].isoformat() == "2026-01-01T12:00:00+00:00"
+    files = conn.execute("SELECT * FROM job_files WHERE job_id = %s ORDER BY id", (job["id"],)).fetchall()
+    assert [(f["role"], f["key"], f["mimetype"], f["bytes"], f["attempt"]) for f in files] == [
+        ("", "folder1/video.mp4", "video/mp4", 1000, 1),
+        ("_final_media", None, "text/html", 13, 1),
+    ]
+    assert (files[0]["hash"], float(files[0]["duration_seconds"])) == ("SHA-256:abc", 61.5)
+    assert files[1]["hash"].startswith("SHA-256:") and files[1]["duration_seconds"] is None
+
+
+def test_done_still_saves_the_result_if_the_stats_fail(conn, module, mocker):
+    job = add_claimed_job(conn, module)
+    list(module)
+    mocker.patch.object(queue_feeder_db, "describe_files", side_effect=ValueError("a bug"))
+    module.done(Metadata().set_url(URL).success("vimeo"))
+    assert db.get_job(conn, job["id"])["status"] == "done"
 
 
 def test_failed_saves_the_reason(conn, module):

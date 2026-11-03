@@ -5,6 +5,7 @@ Opens a connection for each write rather than holding one for a row that can tak
 connection, as the orchestrator swallows errors from done() and the archive would otherwise be lost.
 """
 
+import os
 import time
 from datetime import datetime, timezone
 from typing import Iterator
@@ -15,9 +16,53 @@ from auto_archiver.core import Database, Feeder, Metadata
 from auto_archiver.job_queue import db
 from auto_archiver.modules.gsheet_feeder_db.gsheet_feeder_db import build_result_cells
 from auto_archiver.utils.custom_logger import logger
+from auto_archiver.utils.misc import calculate_file_hash
 
 # about 5 minutes, long enough for a Postgres restart
 RETRY_DELAYS_SECONDS = (5, 15, 30, 60, 60, 60, 60)
+
+
+def describe_result(item: Metadata, cells: dict, cached: bool) -> dict:
+    """The job's columns for the dashboard, as db.RESULT_COLUMNS"""
+    extractor = item.status.split(": success")[0] if ": success" in (item.status or "") else None
+    return {
+        "title": cells.get("title"),
+        "archive_url": cells.get("archive"),
+        "extractor": extractor,
+        "posted_at": item.get_timestamp(iso=False),
+        "cached": cached,
+        "store_failures": len(item.get_store_failures()),
+    }
+
+
+def describe_files(item: Metadata) -> list[dict]:
+    """
+    Each stored file, as db.FILE_COLUMNS. Run in done(), while the files are still in the tmp dir. A file the hash
+    enricher missed (eg the html page, made after it) is hashed here
+    """
+    files = []
+    for media in item.get_all_media():
+        size, file_hash = None, media.get("hash")
+        if media.filename and os.path.isfile(media.filename):
+            size = os.path.getsize(media.filename)
+            if not file_hash:
+                file_hash = f"SHA-256:{calculate_file_hash(media.filename)}"
+        try:
+            duration = float(media.get("duration"))
+        except (TypeError, ValueError):
+            duration = None
+        files.append(
+            {
+                "role": media.get("id") or "",
+                "key": media.key,
+                "url": media.urls[0] if media.urls else None,
+                "mimetype": (media.mimetype or None) if media.filename else None,
+                "bytes": size,
+                "hash": file_hash,
+                "duration_seconds": duration,
+            }
+        )
+    return files
 
 
 class QueueFeederDB(Feeder, Database):
@@ -55,9 +100,9 @@ class QueueFeederDB(Feeder, Database):
         logger.info("STARTED")
         logger.info(f" {self.row_description}")
 
-    def _finish(self, status: str, cells: dict, error: str = None) -> None:
+    def _finish(self, status: str, cells: dict, error: str = None, result: dict = None, files: list = ()) -> None:
         saved = self._with_database(
-            lambda conn: db.finish_job(conn, self.job_id, self.lease_token, status, cells, error)
+            lambda conn: db.finish_job(conn, self.job_id, self.lease_token, status, cells, error, result, files)
         )
         if not saved:
             logger.warning(f"Job {self.job_id} is no longer ours, so this result wasn't saved")
@@ -79,4 +124,11 @@ class QueueFeederDB(Feeder, Database):
         logger.success(f" {self.row_description}")
         if failures := item.get_store_failures():
             logger.warning(f"{len(failures)} file(s) couldn't be stored: {', '.join(failures)}")
-        self._finish("done", build_result_cells(item, cached))
+        cells = build_result_cells(item, cached)
+        try:
+            result, files = describe_result(item, cells, cached), describe_files(item)
+        except Exception as e:
+            # the stats are extra: losing them mustn't lose the archive's result
+            logger.error(f"Couldn't work out the archive's stats, saving the result without them: {e}")
+            result, files = None, ()
+        self._finish("done", cells, result=result, files=files)

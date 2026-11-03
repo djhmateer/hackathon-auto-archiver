@@ -187,6 +187,7 @@ class WorkerSupervisor:
         self.pause_alerted = False
         self.quick_failures = []  # the sheet of each quick failure in a row
         self.idle_logged = None  # the last "Waiting for jobs" line, so it's only logged again when it changes
+        self.git_commit = None  # read once in run(), and saved with each claim
 
     def clear_leftovers(self) -> None:
         """At startup: a child and crawls from a supervisor that died. Its job comes back when the lease expires"""
@@ -319,7 +320,7 @@ class WorkerSupervisor:
         return True
 
     def _claim(self, conn) -> None:
-        job = db.claim_job(conn, self.worker)
+        job = db.claim_job(conn, self.worker, self.git_commit)
         if job is None:
             counts = db.count_active_jobs(conn)
             # queued jobs it can't claim are waiting for their site, a retry, or a paused or disabled sheet
@@ -365,8 +366,9 @@ class WorkerSupervisor:
 
     def run(self) -> None:
         self.clear_leftovers()
+        self.git_commit = git_commit()
         logger.info(
-            f"Started worker {self.worker}, pid {os.getpid()}, code {git_commit()}, database {db.describe_database()}, "
+            f"Started worker {self.worker}, pid {os.getpid()}, code {self.git_commit}, database {db.describe_database()}, "
             f"in {self.dir}, checking every {TICK_SECONDS}s, daily reboot at {self.reboot_at or 'never'}. "
             f"Archiver logs in {os.path.join(self.dir, 'logs')}: 1debug.log, and {CONSOLE_LOG} for console output: "
             "setup errors and crashes"

@@ -105,7 +105,7 @@ poetry run python -m auto_archiver.job_queue.sync rollback <spreadsheet_id>
 
 ## Update the code
 
-The two deploy scripts run from your own machine over SSH, so you need key access to each VM and passwordless `sudo` on it. The host and ports are set at the top of each script.
+To deploy everything, do the coordinator first, as it applies any new migration, then the workers. The two deploy scripts run from your own machine over SSH, so you need key access to each VM and passwordless `sudo` on it. The host and ports are set at the top of each script.
 
 ### Coordinator
 
@@ -118,7 +118,7 @@ bash scripts/job_queue/deploy-coordinator.sh --reset-except-sheets   # the same,
 
 It stops at the first step that fails, which leaves the coordinator stopped.
 
-After migrating, `--reset-except-sheets` empties `outbox`, `jobs`, `shadow_jobs`, `drive_folders`, `alerts` and `heartbeats`, and restarts their ids from 1. It keeps `sheets`, which includes each sheet's enabled/shadow setting, and `schema_migrations`. Before you use it:
+After migrating, `--reset-except-sheets` empties `job_files`, `outbox`, `jobs`, `shadow_jobs`, `drive_folders`, `alerts` and `heartbeats`, and restarts their ids from 1. It keeps `sheets`, which includes each sheet's enabled/shadow setting, and `schema_migrations`. Before you use it:
 
 - Stop the workers first. A job that's running when you reset can't write back its result once its row has gone.
 - The next sync queues again every row whose status is blank.
@@ -163,9 +163,39 @@ j                                          # journalctl -u aa-worker-supervisor 
 | `sudo systemctl stop aa-worker-supervisor` | Killed after 15 minutes, then retried once the lease expires |
 | Ctrl-C, when running in a terminal | Finish, however long they take |
 
+## Archive stats
+
+Each job a worker finishes saves its stats, for a dashboard. Jobs finished before migration 003, or by a worker on older code, have none. Times are UTC.
+
+- `jobs`, besides the sheet, row, folder, worker and timings it already had: `title`, `archive_url`, `extractor` (eg `vimeo`), `posted_at` (when the original was posted), `cached`, `store_failures` (files that didn't upload) and the worker's `git_commit`. The archive took `finished_at - work_started_at`, and waited `started_at - added_at` in the queue.
+- `job_files`: one row per stored file for each attempt, so a retry's files count too. Each has its `role` (eg `browsertrix`, `metadata_json`, blank for the main media), `key`, `url`, `mimetype`, `bytes`, `hash` and `duration_seconds`.
+- `sheets.client`: who the sheet is for. Set it by hand.
+
+If the stats can't be worked out, the result is saved without them, and the archiver logs `Couldn't work out the archive's stats`.
+
+```bash
+export PGPASSWORD=password
+Q="psql -h localhost -U bob -d auto_archiver -c"
+
+$Q "UPDATE sheets SET client = '<client_name>' WHERE spreadsheet_id = '<spreadsheet_id>'"
+
+# the last 20 archives: files, size and how long each took
+$Q "SELECT j.id, j.row_number, j.folder, j.extractor, count(f.id) AS files,
+           pg_size_pretty(sum(f.bytes)) AS size, j.finished_at - j.work_started_at AS took
+    FROM jobs j LEFT JOIN job_files f ON f.job_id = j.id
+    WHERE j.status = 'done' GROUP BY j.id ORDER BY j.id DESC LIMIT 20"
+
+# storage by file type
+$Q "SELECT mimetype, count(*), pg_size_pretty(sum(bytes)) FROM job_files GROUP BY mimetype ORDER BY sum(bytes) DESC"
+
+# storage by client
+$Q "SELECT s.client, count(DISTINCT j.id) AS archives, pg_size_pretty(sum(f.bytes)) AS size
+    FROM job_files f JOIN jobs j ON j.id = f.job_id JOIN sheets s ON s.id = j.sheet_id GROUP BY s.client"
+```
+
 ## Add a migration
 
-Add the next numbered file to `src/auto_archiver/job_queue/migrations/`, such as `002_add_something.sql`, and run `migrate`. Never edit a file that's already been applied.
+Add the next numbered file to `src/auto_archiver/job_queue/migrations/`, such as `004_add_something.sql`, and run `migrate`. Never edit a file that's already been applied.
 
 The coordinator won't start if a migration isn't applied, an applied file has been edited, or the database has a migration its code doesn't.
 
@@ -192,5 +222,6 @@ poetry run python -m auto_archiver.job_queue.writer discard <id>
 Logs:
 
 - **Coordinator and worker supervisor:** `journalctl -u aa-coordinator -f` and `journalctl -u aa-worker-supervisor -f`. The install scripts add a `j` alias for this to `~/.bash_aliases` on each VM.
+- **A job that isn't being claimed:** only one job per site (eg vimeo.com) runs at a time. The coordinator logs `Not claimed yet: job <id> … waits for its site <domain>, as job <id> on worker <worker_name> is running it` once for each job held back like this.
 - **Archiver:** `logs/`, such as `1debug.log` and `hangs.log`
 - **Errors during a job's setup:** `logs/last-job-console.log`
