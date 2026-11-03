@@ -116,13 +116,13 @@ sudo systemctl enable aa-worker-supervisor
 
 cat <<DONE
 
-Done. Still to do by hand:
-  1. Copy into $REPO/secrets/ every config the queue runs, with its service accounts, cookies, sessions and profiles
+Done. The service is enabled, so it starts by itself on the reboot. Still to do by hand, in this order:
+  1. Copy into $REPO/secrets/ every config the queue runs, with its service accounts, cookies, sessions and profiles.
+     Do this before rebooting: without the configs every job fails in setup
   2. Check the versions look right:
        firefox --version; geckodriver --version; google-chrome --version; deno --version
-  3. Reboot, so the docker group applies:
+  3. Reboot, so the docker group applies. The worker starts by itself:
        sudo reboot
-  4. Start it, and watch it:
-       sudo systemctl start aa-worker-supervisor
+  4. Watch it. Look for "Started worker $(hostname)", and "Worker $(hostname) is up" on the coordinator:
        journalctl -u aa-worker-supervisor -f
 DONE

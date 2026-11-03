@@ -56,25 +56,38 @@ Postgres only accepts connections from subnets the VM is directly attached to. A
 
 ## Deploy a new worker VM
 
-Ubuntu 26.04. Pass the coordinator VM's IP:
+Ubuntu 26.04. Before you start:
+
+- **Give the VM its own hostname.** It's the worker's name in the heartbeats, in `jobs.worker` and in the sheet's
+  `Archive in progress (<worker_name>)`. A VM cloned from another worker keeps that worker's hostname, and two workers
+  with one name share a heartbeat, so one can die unnoticed. Check it with `hostname`, and change it with
+  `sudo hostnamectl set-hostname <worker_name>`.
+- **Update the coordinator first** if there's new code. The script's last check fails if the coordinator's database
+  is behind the code's migrations.
+- **The coordinator's database IP** is `172.16.45.40`. An existing worker's start-up line shows it, as
+  `database bob@172.16.45.40:5432/auto_archiver`.
+
+Then, passing the coordinator VM's IP:
 
 ```bash
-sudo apt-get update && sudo apt-get install -y git
-git clone <repo_url> /home/dave/auto-archiver
+git clone https://github.com/djhmateer/hackathon-auto-archiver.git /home/dave/auto-archiver
 cd /home/dave/auto-archiver
-bash scripts/job_queue/install-worker.sh --coordinator-database <coordinator_ip>
+bash scripts/job_queue/install-worker.sh --coordinator-database 172.16.45.40
 ```
 
-Run the script as your normal user, not root. It's safe to run again. It installs Firefox, geckodriver, Chrome, Docker, the browsertrix-crawler and YouTube token containers, Deno, ffmpeg, exiftool, tesseract, Python 3.12 and the project, then checks it can use Postgres. It doesn't start the worker, so then:
+Run the script as your normal user, not root. It's safe to run again. It installs Firefox, geckodriver, Chrome, Docker, the browsertrix-crawler and YouTube token containers, Deno, ffmpeg, exiftool, tesseract, Python 3.12 and the project, then checks it can use Postgres. If that check fails and the VM is on another subnet from the coordinator, the coordinator needs a `pg_hba` line for it.
 
-1. Copy into `secrets/` with FileZilla every config the queue runs, with its service accounts, cookies, sessions and profiles, at the same paths as on the coordinator.
-2. Reboot, so the `docker` group applies: `sudo reboot`
-3. Start it, and watch the logs:
+The script enables the service but doesn't start it, so then, in this order:
+
+1. Copy into `secrets/` with FileZilla every config the queue runs, with its service accounts, cookies, sessions and profiles, at the same paths as on the coordinator. Do this before rebooting: the service starts by itself on the reboot, and without the configs every job fails in setup, and the worker pauses after 3 quick failures.
+2. Reboot, so the `docker` group applies: `sudo reboot`. The worker starts by itself.
+3. Watch the logs:
 
    ```bash
-   sudo systemctl start aa-worker-supervisor
    journalctl -u aa-worker-supervisor -f
    ```
+
+   Look for `Started worker <worker_name>, … daily reboot at 05:20`, then `Waiting for jobs: …`. The coordinator logs `Worker <worker_name> is up`.
 
 A worker VM runs one job at a time, so more capacity means more VMs. It reboots daily at 05:20 UK time. To change that, edit `/etc/systemd/system/aa-worker-supervisor.service`, then run `sudo systemctl daemon-reload`.
 
@@ -115,11 +128,11 @@ On each worker VM, finish the running jobs first. This returns once the signal i
 
 ```bash
 sudo systemctl kill --kill-who=main -s SIGTERM aa-worker-supervisor
-systemctl status aa-worker-supervisor
+systemctl status aa-worker-supervisor      # wait until it says "inactive (dead)" before going on
 git pull origin main
-poetry install --only main
+poetry sync --only main                    # not install: also removes packages that aren't in main
 sudo systemctl start aa-worker-supervisor
-journalctl -u aa-worker-supervisor.service -f
+journalctl -u aa-worker-supervisor -f
 ```
 
 ## Stop a worker
