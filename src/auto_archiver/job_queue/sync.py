@@ -84,10 +84,6 @@ def log_on_change(key, message: str) -> None:
         _last_logged[key] = message
 
 
-def describe_tab(spreadsheet_name: str, tab_title: str) -> str:
-    return f"Sheet '{spreadsheet_name}' tab {tab_title}"
-
-
 def tab_folder(raw_folder: str, spreadsheet_name: str, tab_title: str, use_sheet_names: bool) -> str:
     """The folder files are stored in, as the feeder works it out. No folder in the row means none at all"""
     folder = slugify((raw_folder or "").strip())
@@ -213,16 +209,18 @@ def read_tabs(spreadsheet, tabs: list, settings: dict) -> dict[int, list[Row]]:
             # none of them is just a helper tab, but only one probably means a renamed or deleted header
             if ("url" in positions) != ("status" in positions):
                 logger.warning(
-                    f"Skipped {describe_tab(spreadsheet.title, tab.title)} as it is missing its url or status column"
+                    f"Skipped {db.describe_tab(spreadsheet.title, tab.title)} as it is missing its url or status column"
                 )
             else:
-                logger.info(f"Skipped {describe_tab(spreadsheet.title, tab.title)} as it has no url or status column")
+                logger.info(
+                    f"Skipped {db.describe_tab(spreadsheet.title, tab.title)} as it has no url or status column"
+                )
             continue
         found = [f"'{columns[col]}'" for col in positions]
         missing = [f"'{columns[col]}'" for col in OPTIONAL_COLUMNS if col in columns and col not in positions]
         log_on_change(
             (tab.id, "columns"),
-            f"{describe_tab(spreadsheet.title, tab.title)}: reading the {', '.join(found)} columns"
+            f"{db.describe_tab(spreadsheet.title, tab.title)}: reading the {', '.join(found)} columns"
             + (f", there's no {', '.join(missing)} column" if missing else ""),
         )
         wanted.append((tab, positions))
@@ -258,7 +256,9 @@ def register(conn, config_path: str, opener=open_spreadsheet) -> int:
     spreadsheet = opener(settings)
     tabs = allowed_tabs(spreadsheet, settings)
     for tab in tabs:
-        db.save_tab(conn, spreadsheet.id, tab.id, tab.title, config_path, update_config=True)
+        db.save_tab(
+            conn, spreadsheet.id, tab.id, tab.title, config_path, update_config=True, spreadsheet_name=spreadsheet.title
+        )
     return len(tabs)
 
 
@@ -327,7 +327,8 @@ def sync_cycle(conn, opener=open_spreadsheet) -> None:
             spreadsheet = opener(settings, spreadsheet_id)
             tabs = allowed_tabs(spreadsheet, settings)
             for tab in tabs:
-                db.save_tab(conn, spreadsheet_id, tab.id, tab.title, config_path)  # new tabs and renames
+                # new tabs, and renames of tabs and the spreadsheet
+                db.save_tab(conn, spreadsheet_id, tab.id, tab.title, config_path, spreadsheet_name=spreadsheet.title)
 
             allowed_ids = {tab.id for tab in tabs}
             for sheet in db.get_sheets(conn):
@@ -337,7 +338,7 @@ def sync_cycle(conn, opener=open_spreadsheet) -> None:
                     and sheet["worksheet_gid"] not in allowed_ids
                 ):
                     logger.warning(
-                        f"{describe_tab(spreadsheet.title, sheet['worksheet'])} (sheet {sheet['id']}) is not being read: "
+                        f"{db.describe_tab(spreadsheet.title, sheet['worksheet'])} (sheet {sheet['id']}) is not being read: "
                         f"it was deleted, "
                         f"or renamed or blocked so that {config_path} doesn't allow it"
                     )
@@ -356,7 +357,7 @@ def sync_cycle(conn, opener=open_spreadsheet) -> None:
                     live_tab(conn, sheet["id"], rows, snapshot_at, name, title, settings)
                     log_on_change(
                         gid,
-                        f"{describe_tab(spreadsheet.title, title)} (live): {len(rows)} row(s) with a URL, "
+                        f"{db.describe_tab(spreadsheet.title, title)} (live): {len(rows)} row(s) with a URL, "
                         f"{blank} blank status",
                     )
                 else:
@@ -364,7 +365,7 @@ def sync_cycle(conn, opener=open_spreadsheet) -> None:
                     still_open = len(db.get_open_shadow_jobs(conn, sheet["id"]))
                     log_on_change(
                         gid,
-                        f"{describe_tab(spreadsheet.title, title)} (shadow): {len(rows)} row(s) with a URL, "
+                        f"{db.describe_tab(spreadsheet.title, title)} (shadow): {len(rows)} row(s) with a URL, "
                         f"{blank} blank status, {still_open} open",
                     )
         except Exception as e:

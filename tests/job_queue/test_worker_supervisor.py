@@ -500,13 +500,17 @@ def test_draining_lets_jobs_finish_and_claims_nothing_new(conn, make_supervisor,
 
 def test_draining_logs_each_running_job(conn, make_supervisor, caplog):
     sheet = add_sheet(conn)
+    conn.execute("UPDATE sheets SET spreadsheet_name = 'Example Sheet'")
     job_id = db.add_job(conn, sheet, 7, "https://example.com/post/7", "example.com", "folder1")
     conn.execute("UPDATE jobs SET available_at = now() - interval '1 minute'")
     sup = make_supervisor()
     sup.tick(conn)
     caplog.clear()
     sup.log_draining()
-    assert f"Finishing job {job_id} row 7 folder 'folder1' https://example.com/post/7" in caplog.text
+    expected = (
+        f"Finishing job {job_id} Sheet 'Example Sheet' tab tab1 row 7 folder 'folder1' https://example.com/post/7"
+    )
+    assert expected in caplog.text
 
 
 UK_MORNING = datetime(2026, 11, 2, 5, 30, tzinfo=timezone.utc)  # 05:30 in the UK in winter

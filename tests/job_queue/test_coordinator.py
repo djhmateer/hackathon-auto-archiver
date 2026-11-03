@@ -164,3 +164,20 @@ def test_startup_lists_the_workers(conn, caplog):
     db.beat(conn, "worker-supervisor-vm1")
     coordinator.log_startup(conn)
     assert "Worker vm1: last heartbeat 0s ago" in caplog.text
+
+
+def test_job_lines_name_the_spreadsheet_once_sync_has_read_it(conn, caplog):
+    sheet = add_sheet(conn)
+    conn.execute("UPDATE sheets SET spreadsheet_name = 'Example Sheet'")
+    watcher = coordinator.Watcher()
+    watcher.watch(conn)
+    job_id = db.add_job(conn, sheet, 2, "https://example.com/post/1", "example.com")
+    watcher.watch(conn)
+    assert f"Queued job {job_id} Sheet 'Example Sheet' tab tab1 (config) row 2" in caplog.text
+
+
+def test_startup_names_the_spreadsheet(conn, caplog):
+    add_sheet(conn)
+    conn.execute("UPDATE sheets SET spreadsheet_name = 'Example Sheet'")
+    coordinator.log_startup(conn)
+    assert "Sheet 'Example Sheet' tab tab1 (sheet" in caplog.text

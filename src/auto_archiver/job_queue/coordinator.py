@@ -39,8 +39,8 @@ def cleanup(conn) -> None:
 def describe_job(job: dict) -> str:
     config = db.describe_config(job["config"])
     return (
-        f"job {job['id']} tab {job['worksheet']} ({config}) row {job['row_number']} folder '{job['folder']}' "
-        f"{job['url']}"
+        f"job {job['id']} {db.describe_tab(job['spreadsheet_name'], job['worksheet'])} ({config}) "
+        f"row {job['row_number']} folder '{job['folder']}' {job['url']}"
     )
 
 
@@ -135,8 +135,10 @@ def log_startup(conn) -> None:
         logger.warning("No tabs registered, so there's nothing to do. Run: sync register <config>")
     for sheet in sheets:
         paused = f", paused until {sheet['paused_until']}" if sheet["paused_until"] else ""
+        tab = db.describe_tab(sheet["spreadsheet_name"], sheet["worksheet"])  # "tab ..." when the name isn't known yet
         logger.info(
-            f"Tab {sheet['worksheet']} (sheet {sheet['id']}, {'live' if sheet['enabled'] else 'shadow'}{paused}): "
+            f"{tab[0].upper()}{tab[1:]} "
+            f"(sheet {sheet['id']}, {'live' if sheet['enabled'] else 'shadow'}{paused}): "
             f"spreadsheet {sheet['spreadsheet_id']}, config {sheet['config']}"
         )
     beats = db.get_worker_heartbeats(conn)

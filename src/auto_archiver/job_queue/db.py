@@ -48,6 +48,11 @@ def get_last_cells(conn: psycopg.Connection, job_id: int) -> dict:
     return row["cells"] if row else {}
 
 
+def describe_tab(spreadsheet_name: str, tab_title: str) -> str:
+    """eg Sheet 'AA Dave Testing' tab Sheet1. The name is empty until sync has read the spreadsheet"""
+    return f"Sheet '{spreadsheet_name}' tab {tab_title}" if spreadsheet_name else f"tab {tab_title}"
+
+
 def describe_config(config_path: str) -> str:
     """A config's name for logging, without its folder and .yaml, eg orchestration-aa-dave-testing"""
     return Path(config_path).stem
@@ -96,7 +101,13 @@ def beat(conn: psycopg.Connection, name: str) -> None:
 
 
 def save_tab(
-    conn: psycopg.Connection, spreadsheet_id: str, gid: int, title: str, config: str, update_config: bool = False
+    conn: psycopg.Connection,
+    spreadsheet_id: str,
+    gid: int,
+    title: str,
+    config: str,
+    update_config: bool = False,
+    spreadsheet_name: str = "",
 ) -> None:
     """
     Adds a tab, off so cron keeps it until it's moved. A tab added to a spreadsheet already on the queue starts on,
@@ -105,13 +116,21 @@ def save_tab(
     """
     conn.execute(
         """
-        INSERT INTO sheets (spreadsheet_id, worksheet_gid, worksheet, config, enabled)
+        INSERT INTO sheets (spreadsheet_id, worksheet_gid, worksheet, config, enabled, spreadsheet_name)
         VALUES (%(id)s, %(gid)s, %(title)s, %(config)s,
-                EXISTS (SELECT 1 FROM sheets WHERE spreadsheet_id = %(id)s AND enabled))
+                EXISTS (SELECT 1 FROM sheets WHERE spreadsheet_id = %(id)s AND enabled), %(name)s)
         ON CONFLICT (spreadsheet_id, worksheet_gid) DO UPDATE SET worksheet = EXCLUDED.worksheet,
-            config = CASE WHEN %(update_config)s THEN EXCLUDED.config ELSE sheets.config END
+            config = CASE WHEN %(update_config)s THEN EXCLUDED.config ELSE sheets.config END,
+            spreadsheet_name = CASE WHEN %(name)s = '' THEN sheets.spreadsheet_name ELSE %(name)s END
         """,
-        {"id": spreadsheet_id, "gid": gid, "title": title, "config": config, "update_config": update_config},
+        {
+            "id": spreadsheet_id,
+            "gid": gid,
+            "title": title,
+            "config": config,
+            "update_config": update_config,
+            "name": spreadsheet_name,
+        },
     )
 
 
@@ -183,7 +202,7 @@ def get_worker_heartbeats(conn: psycopg.Connection) -> list[dict]:
 def get_jobs_after(conn: psycopg.Connection, job_id: int) -> list[dict]:
     return conn.execute(
         """
-        SELECT j.*, s.worksheet, s.config FROM jobs j JOIN sheets s ON s.id = j.sheet_id
+        SELECT j.*, s.worksheet, s.config, s.spreadsheet_name FROM jobs j JOIN sheets s ON s.id = j.sheet_id
         WHERE j.id > %s ORDER BY j.id
         """,
         (job_id,),
@@ -193,7 +212,7 @@ def get_jobs_after(conn: psycopg.Connection, job_id: int) -> list[dict]:
 def get_running_jobs(conn: psycopg.Connection) -> list[dict]:
     return conn.execute(
         """
-        SELECT j.*, s.worksheet, s.config FROM jobs j JOIN sheets s ON s.id = j.sheet_id
+        SELECT j.*, s.worksheet, s.config, s.spreadsheet_name FROM jobs j JOIN sheets s ON s.id = j.sheet_id
         WHERE j.status = 'running' ORDER BY j.id
         """
     ).fetchall()
@@ -386,14 +405,16 @@ def claim_job(conn: psycopg.Connection, worker: str) -> dict | None:
             UPDATE jobs SET status = 'running', worker = %s, attempts = attempts + 1,
                 started_at = COALESCE(started_at, now()), work_started_at = NULL,
                 lease_token = gen_random_uuid(), lease_until = now() + interval '5 minutes'
-            WHERE id = (
+            FROM sheets sheet
+            WHERE sheet.id = jobs.sheet_id AND jobs.id = (
                 SELECT j.id FROM jobs j JOIN sheets s ON s.id = j.sheet_id
                 WHERE j.status = 'queued' AND j.available_at <= now() AND s.enabled
                     AND (s.paused_until IS NULL OR s.paused_until <= now())
                 ORDER BY (SELECT count(*) FROM jobs r WHERE r.sheet_id = j.sheet_id
                           AND r.status = 'running')::float / s.weight, j.id
                 FOR UPDATE OF j SKIP LOCKED LIMIT 1
-            ) RETURNING *, (SELECT config FROM sheets s WHERE s.id = jobs.sheet_id) AS config
+            )
+            RETURNING jobs.*, sheet.config, sheet.worksheet, sheet.spreadsheet_name
             """,
             (worker,),
         ).fetchone()
@@ -413,7 +434,7 @@ def claim_job(conn: psycopg.Connection, worker: str) -> dict | None:
 def get_job(conn: psycopg.Connection, job_id: int) -> dict | None:
     return conn.execute(
         """
-        SELECT j.*, s.spreadsheet_id, s.worksheet, s.config
+        SELECT j.*, s.spreadsheet_id, s.worksheet, s.config, s.spreadsheet_name
         FROM jobs j JOIN sheets s ON s.id = j.sheet_id
         WHERE j.id = %s
         """,

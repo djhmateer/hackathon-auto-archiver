@@ -16,7 +16,8 @@ import time
 from gspread import utils as gspread_utils
 
 from auto_archiver.job_queue import db
-from auto_archiver.job_queue.sync import describe_tab, load_settings, open_spreadsheet
+from auto_archiver.job_queue.db import describe_tab
+from auto_archiver.job_queue.sync import load_settings, open_spreadsheet
 from auto_archiver.modules.gsheet_feeder_db.gsheet_feeder_db import cells_to_write
 from auto_archiver.utils.custom_logger import logger
 

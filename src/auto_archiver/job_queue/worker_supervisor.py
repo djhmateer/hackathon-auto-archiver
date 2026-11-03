@@ -143,7 +143,10 @@ def describe_duration(seconds: float) -> str:
 
 
 def describe_job(job: dict) -> str:
-    return f"job {job['id']} row {job['row_number']} folder '{job['folder']}' {job['url']}"
+    return (
+        f"job {job['id']} {db.describe_tab(job['spreadsheet_name'], job['worksheet'])} row {job['row_number']} "
+        f"folder '{job['folder']}' {job['url']}"
+    )
 
 
 @dataclass

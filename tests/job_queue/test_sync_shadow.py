@@ -209,6 +209,17 @@ def test_new_tab_is_found_and_a_rename_is_kept(conn, config):
     assert len(shadow_jobs(conn)) == 2, "the renamed tab's job stays open, not duplicated"
 
 
+def test_spreadsheet_name_is_saved_and_kept_up_to_date(conn, config):
+    sheet = FakeSpreadsheet([tab_of(row("https://example.com/1"))])
+    setup_sheet(conn, sheet)
+    assert db.get_sheets(conn)[0]["spreadsheet_name"] == "Example Sheet"
+    sheet.title = "Renamed Sheet"
+    run(conn, sheet)
+    assert db.get_sheets(conn)[0]["spreadsheet_name"] == "Renamed Sheet"
+    db.save_tab(conn, "spreadsheet1", 1, "Tab 1", CONFIG)
+    assert db.get_sheets(conn)[0]["spreadsheet_name"] == "Renamed Sheet", "no name given keeps the one there is"
+
+
 def test_row_without_a_folder_is_not_recorded_when_one_is_required(conn, config):
     config(must_have_folder_name_for_archive_to_run="true")
     sheet = FakeSpreadsheet(

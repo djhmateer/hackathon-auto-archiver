@@ -108,6 +108,7 @@ git pull origin main
 poetry install --only main
 poetry run python -m auto_archiver.job_queue.migrate
 sudo systemctl restart aa-coordinator
+journalctl -u aa-coordinator -f
 ```
 
 On each worker VM, finish the running jobs first. This returns once the signal is sent, so wait for the service to stop:
@@ -118,6 +119,7 @@ systemctl status aa-worker-supervisor
 git pull origin main
 poetry install --only main
 sudo systemctl start aa-worker-supervisor
+journalctl -u aa-worker-supervisor.service -f
 ```
 
 ## Stop a worker
