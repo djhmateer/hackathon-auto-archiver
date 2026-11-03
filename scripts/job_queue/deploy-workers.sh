@@ -1,5 +1,5 @@
 #!/bin/bash
-# Deploys main to each worker VM over SSH, one at a time: let the running job finish, stop, pull, sync, start.
+# Deploys main to each worker VM over SSH, one at a time: kill the running job, stop, pull, sync, start.
 # Deploy the coordinator first if there's a new migration, as workers don't migrate.
 #
 #   bash scripts/job_queue/deploy-workers.sh
@@ -30,14 +30,11 @@ set -euo pipefail
 export PATH="$HOME/.local/bin:$PATH"
 cd /home/dave/auto-archiver
 
-echo "== $(hostname): stopping aa-worker-supervisor once its running job finishes"
-if systemctl is-active --quiet aa-worker-supervisor; then
-    sudo systemctl kill --kill-who=main -s SIGTERM aa-worker-supervisor
-fi
-while systemctl is-active --quiet aa-worker-supervisor; do
-    echo "   still running a job, waiting..."
-    sleep 30
-done
+echo "== $(hostname): stopping aa-worker-supervisor now, killing any running job"
+# the killed job is retried once its lease expires, and the supervisor clears leftover containers when it starts.
+# stop after the kill, or Restart=on-failure would start it again mid-deploy
+sudo systemctl kill -s SIGKILL aa-worker-supervisor || true
+sudo systemctl stop aa-worker-supervisor
 
 echo "== Pulling main"
 git pull origin main

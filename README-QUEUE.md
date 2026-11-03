@@ -142,7 +142,7 @@ Deploy the coordinator first if there's a new migration. Then, from the repo roo
 bash scripts/job_queue/deploy-workers.sh
 ```
 
-It makes the same commit and push checks, then does each worker in turn, so only one is down at a time. It waits for each worker's running job to finish, however long that takes. The workers' SSH ports are set at the top of the script.
+It makes the same commit and push checks, then does each worker in turn, so only one is down at a time. It doesn't wait for running jobs: it kills them, and each is retried once its lease expires, within 5 minutes. The workers' SSH ports are set at the top of the script.
 
 To do it by hand instead, on each worker VM, finish the running jobs first. This returns once the signal is sent, so wait for the service to stop:
 
