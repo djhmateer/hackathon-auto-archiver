@@ -52,6 +52,7 @@ class Watcher:
     workers_up: set = field(default_factory=set)
     last_job_id: int = 0
     running: dict = field(default_factory=dict)  # job id -> job, as last seen running
+    waiting_for_site: dict = field(default_factory=dict)  # queued job id -> the running job id it's waiting for
 
     def watch(self, conn) -> None:
         if not self.started:
@@ -101,6 +102,17 @@ class Watcher:
                 log = logger.info if status == "done" else logger.warning
                 log(f"Job {job_id} on worker {job['worker']} is now {status}{detail}")
         self.running = running
+
+        # logged once per job, and again only if it ends up waiting for a different job
+        waiting = {}
+        for job in db.get_jobs_waiting_for_site(conn):
+            waiting[job["id"]] = job["busy_job_id"]
+            if self.waiting_for_site.get(job["id"]) != job["busy_job_id"]:
+                logger.info(
+                    f"Not claimed yet: {describe_job(job)} waits for its site {job['domain']}, "
+                    f"as job {job['busy_job_id']} on worker {job['busy_worker']} is running it"
+                )
+        self.waiting_for_site = waiting
 
 
 def cycle(conn, sync_due: bool, watcher: Watcher = None) -> None:

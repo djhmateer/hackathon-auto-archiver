@@ -151,6 +151,24 @@ def test_a_job_is_logged_when_queued_claimed_and_finished(conn, caplog):
     )
 
 
+def test_a_job_waiting_for_its_site_is_logged_once(conn, caplog):
+    sheet = add_sheet(conn)
+    watcher = coordinator.Watcher()
+    watcher.watch(conn)
+    first = db.add_job(conn, sheet, 2, "https://vimeo.com/1", "vimeo.com")
+    second = db.add_job(conn, sheet, 3, "https://vimeo.com/2", "vimeo.com")
+    db.claim_job(conn, "vm1")
+
+    watcher.watch(conn)
+    watcher.watch(conn)
+    waiting = (
+        f"Not claimed yet: job {second} tab tab1 (config) row 3 folder '' https://vimeo.com/2 waits for its site "
+        f"vimeo.com, as job {first} on worker vm1 is running it"
+    )
+    assert caplog.text.count(waiting) == 1
+    assert f"Not claimed yet: job {first} " not in caplog.text
+
+
 def test_a_rejected_row_is_logged_with_its_reason(conn, caplog):
     sheet = add_sheet(conn)
     watcher = coordinator.Watcher()

@@ -220,6 +220,20 @@ def get_running_jobs(conn: psycopg.Connection) -> list[dict]:
     ).fetchall()
 
 
+def get_jobs_waiting_for_site(conn: psycopg.Connection) -> list[dict]:
+    """Queued jobs that could be claimed now, except that another job for their site is running"""
+    return conn.execute(
+        """
+        SELECT j.*, s.worksheet, s.config, s.spreadsheet_name, busy.id AS busy_job_id, busy.worker AS busy_worker
+        FROM jobs j JOIN sheets s ON s.id = j.sheet_id
+        JOIN jobs busy ON busy.domain = j.domain AND busy.status = 'running'
+        WHERE j.status = 'queued' AND j.available_at <= now() AND s.enabled
+            AND (s.paused_until IS NULL OR s.paused_until <= now())
+        ORDER BY j.id
+        """
+    ).fetchall()
+
+
 def get_open_shadow_jobs(conn: psycopg.Connection, sheet_id: int) -> list[dict]:
     return conn.execute(
         "SELECT * FROM shadow_jobs WHERE sheet_id = %s AND closed_at IS NULL ORDER BY id", (sheet_id,)
