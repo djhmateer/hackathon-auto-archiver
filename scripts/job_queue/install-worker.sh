@@ -114,6 +114,11 @@ sed -e "s#/home/dave/auto-archiver#$REPO#g" -e "s#/home/dave#$HOME#g" -e "s#^Use
 sudo systemctl daemon-reload
 sudo systemctl enable aa-worker-supervisor
 
+echo "=== Alias: j follows the worker supervisor's logs"
+alias_line="alias j='journalctl -u aa-worker-supervisor -f'"
+touch "$HOME/.bash_aliases"
+grep -qxF "$alias_line" "$HOME/.bash_aliases" || echo "$alias_line" >> "$HOME/.bash_aliases"
+
 cat <<DONE
 
 Done. The service is enabled, so it starts by itself on the reboot. Still to do by hand, in this order:
@@ -124,5 +129,5 @@ Done. The service is enabled, so it starts by itself on the reboot. Still to do 
   3. Reboot, so the docker group applies. The worker starts by itself:
        sudo reboot
   4. Watch it. Look for "Started worker $(hostname)", and "Worker $(hostname) is up" on the coordinator:
-       journalctl -u aa-worker-supervisor -f
+       j     (journalctl -u aa-worker-supervisor -f)
 DONE

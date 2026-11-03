@@ -69,6 +69,11 @@ sed -e "s#/home/dave/auto-archiver#$REPO#g" -e "s#/home/dave#$HOME#g" -e "s#^Use
 sudo systemctl daemon-reload
 sudo systemctl enable aa-coordinator
 
+echo "=== Alias: j follows the coordinator's logs"
+alias_line="alias j='journalctl -u aa-coordinator -f'"
+touch "$HOME/.bash_aliases"
+grep -qxF "$alias_line" "$HOME/.bash_aliases" || echo "$alias_line" >> "$HOME/.bash_aliases"
+
 cat <<DONE
 
 Done. Still to do by hand:
@@ -78,7 +83,7 @@ Done. Still to do by hand:
        poetry run python -m auto_archiver.job_queue.sync register secrets/<config>.yaml
   4. Start it, and watch it:
        sudo systemctl start aa-coordinator
-       journalctl -u aa-coordinator -f
+       j     (journalctl -u aa-coordinator -f, from your next login)
 
 Workers connect with: postgresql://$DB_USER:<password>@<this VM's IP>:5432/$DB_NAME
 DONE
