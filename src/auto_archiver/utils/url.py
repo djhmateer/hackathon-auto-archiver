@@ -70,6 +70,29 @@ def sheet_url_hostname(url: str) -> str:
         return ""  # eg an unmatched [ in the host
 
 
+# second-level labels under a country code, so bbc.co.uk is one site and not all of co.uk
+COUNTRY_SECOND_LEVELS = {"ac", "co", "com", "edu", "gov", "net", "or", "org", "ne", "go"}
+# domains that are the same site
+SITE_ALIASES = {"youtu.be": "youtube.com", "twitter.com": "x.com"}
+
+
+def site_for_hostname(hostname: str) -> str:
+    """
+    The site a hostname belongs to, so the job queue runs one job per site at a time:
+    www.vimeo.com and player.vimeo.com are vimeo.com, youtu.be is youtube.com. An IP address is its own site
+    """
+    hostname = hostname.lower().rstrip(".")
+    try:
+        ip_address(hostname)
+        return hostname
+    except ValueError:
+        pass
+    labels = hostname.split(".")
+    keep = 3 if len(labels) >= 3 and len(labels[-1]) == 2 and labels[-2] in COUNTRY_SECOND_LEVELS else 2
+    site = ".".join(labels[-keep:])
+    return SITE_ALIASES.get(site, site)
+
+
 def domain_for_url(url: str) -> str:
     """
     SECURITY: parse the domain using urllib to avoid any potential security issues

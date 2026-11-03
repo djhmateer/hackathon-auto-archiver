@@ -58,17 +58,6 @@ Postgres only accepts connections from subnets the VM is directly attached to. A
 
 Ubuntu 26.04. Before you start:
 
-- **Give the VM its own hostname.** It's the worker's name in the heartbeats, in `jobs.worker` and in the sheet's
-  `Archive in progress (<worker_name>)`. A VM cloned from another worker keeps that worker's hostname, and two workers
-  with one name share a heartbeat, so one can die unnoticed. Check it with `hostname`, and change it with
-  `sudo hostnamectl set-hostname <worker_name>`.
-- **Update the coordinator first** if there's new code. The script's last check fails if the coordinator's database
-  is behind the code's migrations.
-- **The coordinator's database IP** is `172.16.45.40`. An existing worker's start-up line shows it, as
-  `database bob@172.16.45.40:5432/auto_archiver`.
-
-Then, passing the coordinator VM's IP:
-
 ```bash
 git clone https://github.com/djhmateer/hackathon-auto-archiver.git /home/dave/auto-archiver
 cd /home/dave/auto-archiver

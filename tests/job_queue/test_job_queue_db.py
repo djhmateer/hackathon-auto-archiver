@@ -19,8 +19,9 @@ def add_sheet(conn, gid=1, weight=1, enabled=True) -> int:
     ).fetchone()["id"]
 
 
-def add_job(conn, sheet_id, row=2) -> int | None:
-    job_id = db.add_job(conn, sheet_id, row, f"https://example.com/post/{row}", "example.com")
+def add_job(conn, sheet_id, row=2, domain=None) -> int | None:
+    """Each row gets its own domain unless one is given, as only one job per domain runs at a time"""
+    job_id = db.add_job(conn, sheet_id, row, f"https://example.com/post/{row}", domain or f"example{row}.com")
     if job_id is not None:
         make_available(conn, job_id)
     return job_id
@@ -133,7 +134,7 @@ def test_oldest_job_goes_first(conn):
 def test_sheet_with_no_running_jobs_goes_ahead_of_a_backlog(conn):
     busy, quiet = add_sheet(conn, gid=1), add_sheet(conn, gid=2)
     busy_jobs = [add_job(conn, busy, row=row) for row in range(2, 5)]
-    quiet_job = add_job(conn, quiet)
+    quiet_job = add_job(conn, quiet, domain="quiet.example")
     assert db.claim_job(conn, "vm1")["id"] == busy_jobs[0]
     assert db.claim_job(conn, "vm1")["id"] == quiet_job
 
@@ -141,12 +142,53 @@ def test_sheet_with_no_running_jobs_goes_ahead_of_a_backlog(conn):
 def test_weight_gives_a_sheet_a_bigger_share(conn):
     heavy, light = add_sheet(conn, gid=1, weight=2), add_sheet(conn, gid=2, weight=1)
     heavy_jobs = [add_job(conn, heavy, row=row) for row in range(2, 5)]
-    light_job = add_job(conn, light)
+    light_job = add_job(conn, light, domain="light.example")
     assert db.claim_job(conn, "vm1")["id"] == heavy_jobs[0]
     # heavy is at 1/2 and light at 0/1, so light goes next
     assert db.claim_job(conn, "vm1")["id"] == light_job
     # heavy is at 1/2 with nothing left on light
     assert db.claim_job(conn, "vm1")["id"] == heavy_jobs[1]
+
+
+def test_only_one_job_per_domain_runs_at_a_time(conn):
+    sheet = add_sheet(conn)
+    first = add_job(conn, sheet, row=2, domain="vimeo.com")
+    second = add_job(conn, sheet, row=3, domain="vimeo.com")
+    other = add_job(conn, sheet, row=4, domain="youtube.com")
+    assert db.claim_job(conn, "vm1")["id"] == first
+    assert db.claim_job(conn, "vm2")["id"] == other, "skips the second vimeo.com job"
+    assert db.claim_job(conn, "vm3") is None
+
+    token = job(conn, first)["lease_token"]
+    db.finish_job(conn, first, token, "done", {"status": "ok"})
+    assert db.claim_job(conn, "vm3")["id"] == second
+
+
+def test_workers_claiming_at_once_never_run_two_jobs_for_one_domain(conn, database_url):
+    sheet = add_sheet(conn)
+    for row in range(2, 12):
+        add_job(conn, sheet, row=row, domain="vimeo.com")
+    workers = 8
+    start = threading.Barrier(workers)
+    claimed, errors = [], []
+
+    def claim_once(name):
+        try:
+            with db.connect(database_url) as worker_conn:
+                start.wait()
+                if found := db.claim_job(worker_conn, name):
+                    claimed.append(found["id"])
+        except Exception as e:
+            errors.append(e)
+
+    threads = [threading.Thread(target=claim_once, args=(f"vm{i}",)) for i in range(workers)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+
+    assert errors == []
+    assert len(claimed) == 1
 
 
 def test_workers_claiming_at_once_never_get_the_same_job(conn, database_url):

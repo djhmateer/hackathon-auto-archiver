@@ -4,6 +4,7 @@ from auto_archiver.utils.url import (
     is_auth_wall,
     check_url_or_raise,
     domain_for_url,
+    site_for_hostname,
     is_relevant_url,
     remove_get_parameters,
     twitter_best_quality_url,
@@ -219,3 +220,25 @@ def test_get_media_url_best_quality(input_url, expected_url):
 )
 def test_clean_removes_trackers(input_url, expected_url):
     assert clean(input_url) == expected_url
+
+
+@pytest.mark.parametrize(
+    "hostname, site",
+    [
+        ("vimeo.com", "vimeo.com"),
+        ("www.vimeo.com", "vimeo.com"),
+        ("player.vimeo.com", "vimeo.com"),
+        ("WWW.Vimeo.COM.", "vimeo.com"),
+        ("m.facebook.com", "facebook.com"),
+        ("www.bbc.co.uk", "bbc.co.uk"),
+        ("news.example.com.au", "example.com.au"),
+        ("youtu.be", "youtube.com"),
+        ("www.youtube.com", "youtube.com"),
+        ("twitter.com", "x.com"),
+        ("mobile.twitter.com", "x.com"),
+        ("203.0.113.7", "203.0.113.7"),
+        ("localhost", "localhost"),
+    ],
+)
+def test_site_for_hostname(hostname, site):
+    assert site_for_hostname(hostname) == site

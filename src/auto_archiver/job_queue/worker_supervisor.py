@@ -322,8 +322,12 @@ class WorkerSupervisor:
         job = db.claim_job(conn, self.worker)
         if job is None:
             counts = db.count_active_jobs(conn)
-            # queued jobs it can't claim are waiting for a retry, or on a paused or disabled sheet
-            why = " (waiting for a retry, or on a paused or disabled sheet)" if counts["queued"] else ""
+            # queued jobs it can't claim are waiting for their site, a retry, or a paused or disabled sheet
+            why = (
+                " (waiting for their site to be free, a retry, or a paused or disabled sheet)"
+                if counts["queued"]
+                else ""
+            )
             message = (
                 f"Waiting for jobs: none to claim. On all workers {counts['queued']} queued{why}, "
                 f"{counts['running']} running"
@@ -341,7 +345,9 @@ class WorkerSupervisor:
             raise
         self.running = RunningJob(job, process, self.clock(), self.clock())
         self.idle_logged = None  # so going idle again after this job is logged
-        logger.info(f"Started {describe_job(job)}, attempt {job['attempts']}, config {db.describe_config(job['config'])}")
+        logger.info(
+            f"Started {describe_job(job)}, attempt {job['attempts']}, config {db.describe_config(job['config'])}"
+        )
 
     def tick(self, conn) -> None:
         if self.running is not None:

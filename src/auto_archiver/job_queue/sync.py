@@ -25,7 +25,7 @@ from auto_archiver.core.config import read_yaml
 from auto_archiver.job_queue import db
 from auto_archiver.modules.gsheet_feeder_db import GWorksheet
 from auto_archiver.utils.custom_logger import logger
-from auto_archiver.utils.url import sheet_url_hostname
+from auto_archiver.utils.url import sheet_url_hostname, site_for_hostname
 
 READ_ONLY_SCOPES = [
     "https://www.googleapis.com/auth/spreadsheets.readonly",
@@ -130,7 +130,8 @@ def decide(
                 actions.append(Action(REJECT, row.number, row.url, message="WARNING:Folder Name not set"))
             else:
                 folder = tab_folder(row.folder, spreadsheet_name, tab_title, use_sheet_names)
-                actions.append(Action(ADD, row.number, row.url, domain=hostname, folder=folder))
+                # the site, not the hostname, as the queue runs one job per site at a time
+                actions.append(Action(ADD, row.number, row.url, domain=site_for_hostname(hostname), folder=folder))
         elif (row.status == db.STATUS_QUEUED or db.is_in_progress(row.status)) and not blocked:
             # rule 3, unless the job's last write came after this read, so the row has already moved on
             if state.written_since_snapshot:
@@ -338,9 +339,8 @@ def sync_cycle(conn, opener=open_spreadsheet) -> None:
                     and sheet["worksheet_gid"] not in allowed_ids
                 ):
                     logger.warning(
-                        f"{db.describe_tab(spreadsheet.title, sheet['worksheet'])} (sheet {sheet['id']}) is not being read: "
-                        f"it was deleted, "
-                        f"or renamed or blocked so that {config_path} doesn't allow it"
+                        f"{db.describe_tab(spreadsheet.title, sheet['worksheet'])} (sheet {sheet['id']}) "
+                        f"is not being read: it was deleted, or renamed or blocked so that {config_path} doesn't allow it"
                     )
 
             sheets = {

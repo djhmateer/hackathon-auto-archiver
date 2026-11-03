@@ -15,6 +15,8 @@ from psycopg.types.json import Jsonb
 
 STATUS_QUEUED = "Queued"
 STATUS_IN_PROGRESS = "Archive in progress"
+# any fixed number, for the advisory lock that makes claims take turns
+CLAIM_LOCK = 4_242_001
 
 
 def in_progress_status(worker: str) -> str:
@@ -396,10 +398,15 @@ def claim_job(conn: psycopg.Connection, worker: str) -> dict | None:
     Claims the next job, or returns None if there isn't one. The sheet with the fewest running jobs for its weight
     goes first, then the oldest job.
 
+    Skips a job whose domain (its site, eg vimeo.com) already has a job running, so no site gets more than one at a
+    time. The lock makes claims take turns, or two workers could each see the site free and both claim it.
+
     Only the job's first claim adds the in progress status. That's found from the outbox rather than attempts, because
     a setup failure gives its attempt back.
     """
     with conn.transaction():
+        # released at the end of the transaction. The UPDATE after it sees any claim committed while it waited
+        conn.execute("SELECT pg_advisory_xact_lock(%s)", (CLAIM_LOCK,))
         job = conn.execute(
             """
             UPDATE jobs SET status = 'running', worker = %s, attempts = attempts + 1,
@@ -410,6 +417,7 @@ def claim_job(conn: psycopg.Connection, worker: str) -> dict | None:
                 SELECT j.id FROM jobs j JOIN sheets s ON s.id = j.sheet_id
                 WHERE j.status = 'queued' AND j.available_at <= now() AND s.enabled
                     AND (s.paused_until IS NULL OR s.paused_until <= now())
+                    AND NOT EXISTS (SELECT 1 FROM jobs busy WHERE busy.domain = j.domain AND busy.status = 'running')
                 ORDER BY (SELECT count(*) FROM jobs r WHERE r.sheet_id = j.sheet_id
                           AND r.status = 'running')::float / s.weight, j.id
                 FOR UPDATE OF j SKIP LOCKED LIMIT 1

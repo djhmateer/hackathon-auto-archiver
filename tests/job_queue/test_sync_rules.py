@@ -21,6 +21,11 @@ def test_none_status_counts_as_blank():
     assert kinds(decide([Row(2, URL, status=None)], {})) == [ADD]
 
 
+def test_job_domain_is_the_site_so_subdomains_share_the_limit():
+    assert decide([Row(2, "https://player.vimeo.com/video/1")], {})[0].domain == "vimeo.com"
+    assert decide([Row(2, "https://youtu.be/abc")], {})[0].domain == "youtube.com"
+
+
 def test_url_with_no_scheme_or_stray_punctuation_gets_its_domain():
     assert decide([Row(2, "example.com/page")], {})[0].domain == "example.com"
     assert decide([Row(2, ": https://example.com/page")], {})[0].domain == "example.com"

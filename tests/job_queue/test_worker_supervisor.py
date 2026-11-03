@@ -133,7 +133,7 @@ def test_idle_line_is_only_logged_when_it_changes(conn, make_supervisor, clock, 
     add_job(conn, add_sheet(conn))
     conn.execute("UPDATE jobs SET available_at = now() + interval '1 hour'")
     sup.tick(conn)
-    assert "1 queued (waiting for a retry, or on a paused or disabled sheet)" in caplog.text
+    assert "1 queued (waiting for their site to be free, a retry, or a paused or disabled sheet)" in caplog.text
 
 
 def test_going_idle_again_after_a_job_is_logged(conn, make_supervisor, children, caplog):
