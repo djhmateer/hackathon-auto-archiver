@@ -49,7 +49,7 @@ Run the script as your normal user, not root. It's safe to run again. It doesn't
 
    ```bash
    sudo systemctl start aa-coordinator
-   journalctl -u aa-coordinator -f
+   j                                       # journalctl -u aa-coordinator -f, from your next login
    ```
 
 Postgres only accepts connections from subnets the VM is directly attached to. A worker elsewhere needs its own `pg_hba` line.
@@ -73,7 +73,7 @@ The script enables the service but doesn't start it, so then, in this order:
 3. Watch the logs:
 
    ```bash
-   journalctl -u aa-worker-supervisor -f
+   j                                       # journalctl -u aa-worker-supervisor -f
    ```
 
    Look for `Started worker <worker_name>, … daily reboot at 05:20`, then `Waiting for jobs: …`. The coordinator logs `Worker <worker_name> is up`.
@@ -81,6 +81,8 @@ The script enables the service but doesn't start it, so then, in this order:
 A worker VM runs one job at a time, so more capacity means more VMs. It reboots daily at 05:20 UK time. To change that, edit `/etc/systemd/system/aa-worker-supervisor.service`, then run `sudo systemctl daemon-reload`.
 
 A VM should run cron or a worker supervisor, not both.
+
+Add the new worker's SSH port to `PORTS` at the top of `scripts/job_queue/deploy-workers.sh`, so updates reach it.
 
 ## Move a spreadsheet from cron to the queue
 
@@ -103,31 +105,20 @@ poetry run python -m auto_archiver.job_queue.sync rollback <spreadsheet_id>
 
 ## Update the code
 
+The two deploy scripts run from your own machine over SSH, so you need key access to each VM and passwordless `sudo` on it. The host and ports are set at the top of each script.
+
 ### Coordinator
 
 Push your changes to `main` first, as the coordinator pulls from GitHub. The script refuses to run if anything is uncommitted, including untracked files, or if a commit isn't pushed yet. Then, from the repo root on your own machine:
 
 ```bash
-bash scripts/job_queue/deploy-coordinator.sh
+bash scripts/job_queue/deploy-coordinator.sh                         # stop, pull, install, migrate, start
+bash scripts/job_queue/deploy-coordinator.sh --reset-except-sheets   # the same, and empty the queue to start again
 ```
 
-This connects to the coordinator over SSH at `192.168.1.212` on port `340`, so you need key access to it. The host and port are set at the top of the script. On the coordinator it then:
+It stops at the first step that fails, which leaves the coordinator stopped.
 
-1. stops `aa-coordinator`
-2. pulls `main`
-3. runs `poetry install --only main`
-4. runs the migrations
-5. starts `aa-coordinator`, and shows whether it's running and the last 20 log lines
-
-It stops at the first step that fails. If that happens, the coordinator stays stopped until you fix the problem and run the script again.
-
-To start again with an empty queue, add `--reset-except-sheets`:
-
-```bash
-bash scripts/job_queue/deploy-coordinator.sh --reset-except-sheets
-```
-
-After migrating, this empties `outbox`, `jobs`, `shadow_jobs`, `drive_folders`, `alerts` and `heartbeats`, and restarts their ids from 1. It keeps `sheets`, which includes each sheet's enabled/shadow setting, and `schema_migrations`. Before you use it:
+After migrating, `--reset-except-sheets` empties `outbox`, `jobs`, `shadow_jobs`, `drive_folders`, `alerts` and `heartbeats`, and restarts their ids from 1. It keeps `sheets`, which includes each sheet's enabled/shadow setting, and `schema_migrations`. Before you use it:
 
 - Stop the workers first. A job that's running when you reset can't write back its result once its row has gone.
 - The next sync queues again every row whose status is blank.
@@ -145,7 +136,15 @@ j                                          # journalctl -u aa-coordinator -f
 
 ### Workers
 
-On each worker VM, finish the running jobs first. This returns once the signal is sent, so wait for the service to stop:
+Deploy the coordinator first if there's a new migration. Then, from the repo root on your own machine:
+
+```bash
+bash scripts/job_queue/deploy-workers.sh
+```
+
+It makes the same commit and push checks, then does each worker in turn, so only one is down at a time. It waits for each worker's running job to finish, however long that takes. The workers' SSH ports are set at the top of the script.
+
+To do it by hand instead, on each worker VM, finish the running jobs first. This returns once the signal is sent, so wait for the service to stop:
 
 ```bash
 sudo systemctl kill --kill-who=main -s SIGTERM aa-worker-supervisor
@@ -153,7 +152,7 @@ systemctl status aa-worker-supervisor      # wait until it says "inactive (dead)
 git pull origin main
 poetry sync --only main                    # not install: also removes packages that aren't in main
 sudo systemctl start aa-worker-supervisor
-journalctl -u aa-worker-supervisor -f
+j                                          # journalctl -u aa-worker-supervisor -f
 ```
 
 ## Stop a worker
