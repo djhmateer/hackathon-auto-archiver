@@ -288,6 +288,9 @@ class WorkerSupervisor:
             # a connection error raises and leaves the job running: only a changed token means it's been taken
             if db.renew_lease(conn, running.job["id"], running.job["lease_token"]):
                 running.renewed = self.clock()
+            elif db.get_job(conn, running.job["id"])["lease_token"] == running.job["lease_token"]:
+                # still ours but no longer running: the child has saved its result and is exiting
+                running.renewed = self.clock()
             else:
                 logger.warning(f"Job {running.job['id']} was taken by another worker, killing the child")
                 running.stolen = True

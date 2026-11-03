@@ -223,5 +223,6 @@ Logs:
 
 - **Coordinator and worker supervisor:** `journalctl -u aa-coordinator -f` and `journalctl -u aa-worker-supervisor -f`. The install scripts add a `j` alias for this to `~/.bash_aliases` on each VM.
 - **A job that isn't being claimed:** only one job per site (eg vimeo.com) runs at a time. The coordinator logs `Not claimed yet: job <id> … waits for its site <domain>, as job <id> on worker <worker_name> is running it` once for each job held back like this.
+- **A Vimeo URL with no video:** if a vimeo.com job finishes as `wacz: success`, the coordinator logs a WARNING, `Job <id> got no video from vimeo.com, only a WACZ of the page`. The sheet looks like a success, but Cloudflare is probably challenging the workers' IP. To fix it, open a Vimeo video in a browser on the same network, pass the "Verify you are human" check, then clear the row's status so it runs again.
 - **Archiver:** `logs/`, such as `1debug.log` and `hangs.log`
 - **Errors during a job's setup:** `logs/last-job-console.log`

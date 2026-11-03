@@ -151,6 +151,27 @@ def test_a_job_is_logged_when_queued_claimed_and_finished(conn, caplog):
     )
 
 
+@pytest.mark.parametrize(
+    "url, domain, extractor, warned",
+    [
+        ("https://vimeo.com/1", "vimeo.com", "wacz", True),
+        ("https://vimeo.com/1", "vimeo.com", "yt-dlp_Generic", False),
+        ("https://example.com/post/1", "example.com", "wacz", False),
+    ],
+)
+def test_a_vimeo_job_with_only_a_wacz_is_warned_about(conn, caplog, url, domain, extractor, warned):
+    sheet = add_sheet(conn)
+    watcher = coordinator.Watcher()
+    watcher.watch(conn)
+    job_id = db.add_job(conn, sheet, 2, url, domain)
+    job = db.claim_job(conn, "vm1")
+    watcher.watch(conn)
+
+    db.finish_job(conn, job_id, job["lease_token"], "done", {"status": "ok"}, result={"extractor": extractor})
+    watcher.watch(conn)
+    assert (f"Job {job_id} got no video from vimeo.com" in caplog.text) is warned
+
+
 def test_a_job_waiting_for_its_site_is_logged_once(conn, caplog):
     sheet = add_sheet(conn)
     watcher = coordinator.Watcher()

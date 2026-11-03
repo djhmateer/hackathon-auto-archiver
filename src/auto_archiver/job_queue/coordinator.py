@@ -101,6 +101,12 @@ class Watcher:
                     detail = f": archive {cells.get('archive', '')}, title {cells.get('title', '')!r}"
                 log = logger.info if status == "done" else logger.warning
                 log(f"Job {job_id} on worker {job['worker']} is now {status}{detail}")
+                if status == "done" and current["domain"] == "vimeo.com" and current["extractor"] == "wacz":
+                    logger.warning(
+                        f"Job {job_id} got no video from vimeo.com, only a WACZ of the page. Cloudflare may be "
+                        "challenging the workers' IP: open a Vimeo video in a browser on that network, pass the "
+                        "check, then rerun the row"
+                    )
         self.running = running
 
         # logged once per job, and again only if it ends up waiting for a different job

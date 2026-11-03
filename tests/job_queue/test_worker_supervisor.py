@@ -198,6 +198,24 @@ def test_stolen_lease_kills_the_child_and_changes_nothing(conn, make_supervisor,
     assert sup.running is None
 
 
+def test_a_child_that_has_saved_its_result_but_not_exited_is_left_alone(conn, make_supervisor, clock, children, caplog):
+    job_id = add_job(conn, add_sheet(conn))
+    sup = make_supervisor()
+    sup.tick(conn)
+    token = job(conn, job_id)["lease_token"]
+    db.finish_job(conn, job_id, token, "done", {"status": "done"})
+
+    clock.now += 61
+    sup.tick(conn)
+    assert children[0].killed is False
+    assert "taken by another worker" not in caplog.text
+
+    children[0].exit_code = 0
+    sup.tick(conn)
+    assert f"Finished job {job_id}: done" in caplog.text
+    assert sup.running is None
+
+
 # exits
 
 
