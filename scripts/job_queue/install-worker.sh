@@ -33,6 +33,10 @@ sudo apt-get install -y git curl wget unzip ca-certificates gnupg build-essentia
     ffmpeg libimage-exiftool-perl tesseract-ocr fonts-noto
 sudo install -m 0755 -d /etc/apt/keyrings
 
+echo "=== No crash dumps, which would reserve 512 MB of a 4 GB VM's RAM. Applies from the reboot"
+sudo apt-get purge -y kdump-tools
+sudo update-grub
+
 echo "=== Firefox and geckodriver, for screenshots"
 # Ubuntu's own firefox package is a snap, so use Mozilla's, and pin it above Ubuntu's
 wget -qO- https://packages.mozilla.org/apt/repo-signing-key.gpg | sudo tee /etc/apt/keyrings/packages.mozilla.org.asc >/dev/null
@@ -126,7 +130,7 @@ Done. The service is enabled, so it starts by itself on the reboot. Still to do 
      Do this before rebooting: without the configs every job fails in setup
   2. Check the versions look right:
        firefox --version; geckodriver --version; google-chrome --version; deno --version
-  3. Reboot, so the docker group applies. The worker starts by itself:
+  3. Reboot, so the docker group and the freed crash dump memory apply. The worker starts by itself:
        sudo reboot
   4. Watch it. Look for "Started worker $(hostname)", and "Worker $(hostname) is up" on the coordinator:
        j     (journalctl -u aa-worker-supervisor -f)

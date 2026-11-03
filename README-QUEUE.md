@@ -69,7 +69,7 @@ Run the script as your normal user, not root. It's safe to run again. It install
 The script enables the service but doesn't start it, so then, in this order:
 
 1. Copy into `secrets/` with FileZilla every config the queue runs, with its service accounts, cookies, sessions and profiles, at the same paths as on the coordinator. Do this before rebooting: the service starts by itself on the reboot, and without the configs every job fails in setup, and the worker pauses after 3 quick failures.
-2. Reboot, so the `docker` group applies: `sudo reboot`. The worker starts by itself.
+2. Reboot, so the `docker` group applies, and the 512 MB that crash dumps (`kdump-tools`, which the script removes) would reserve is freed: `sudo reboot`. The worker starts by itself.
 3. Watch the logs:
 
    ```bash
