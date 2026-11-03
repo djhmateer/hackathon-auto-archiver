@@ -9,11 +9,23 @@ from pathlib import Path
 from datetime import datetime, timezone
 
 import psycopg
+from psycopg.conninfo import conninfo_to_dict
 from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 
 STATUS_QUEUED = "Queued"
 STATUS_IN_PROGRESS = "Archive in progress"
+
+
+def in_progress_status(worker: str) -> str:
+    """What the sheet shows while a job runs, eg 'Archive in progress (vm1)'"""
+    return f"{STATUS_IN_PROGRESS} ({worker})"
+
+
+def is_in_progress(status: str) -> bool:
+    """With or without the worker's name, as rows written before it was added have none"""
+    return status == STATUS_IN_PROGRESS or status.startswith(f"{STATUS_IN_PROGRESS} (")
+
 
 ENV_FILE = Path(".env")  # in the repo root, which everything runs from
 MAX_ATTEMPTS = 3
@@ -28,6 +40,23 @@ def database_url(env_file: Path = ENV_FILE) -> str:
             if line.startswith("AA_DATABASE_URL="):
                 return line.split("=", 1)[1].strip().strip("'\"")
     raise RuntimeError(f"No database set: add AA_DATABASE_URL=<connection string> to {env_file.absolute()}")
+
+
+def get_last_cells(conn: psycopg.Connection, job_id: int) -> dict:
+    """The cells of the job's last sheet update, eg its result"""
+    row = conn.execute("SELECT cells FROM outbox WHERE job_id = %s ORDER BY id DESC LIMIT 1", (job_id,)).fetchone()
+    return row["cells"] if row else {}
+
+
+def describe_config(config_path: str) -> str:
+    """A config's name for logging, without its folder and .yaml, eg orchestration-aa-dave-testing"""
+    return Path(config_path).stem
+
+
+def describe_database(url: str = None) -> str:
+    """user@host:port/dbname, without the password, for logging"""
+    info = conninfo_to_dict(url or database_url())
+    return f"{info.get('user', '')}@{info.get('host', 'localhost')}:{info.get('port', 5432)}/{info.get('dbname', '')}"
 
 
 def connect(url: str = None) -> psycopg.Connection:
@@ -140,6 +169,36 @@ def get_queue_summary(conn: psycopg.Connection) -> dict:
     ).fetchone()
 
 
+def get_worker_heartbeats(conn: psycopg.Connection) -> list[dict]:
+    """Each worker supervisor's name and how many seconds ago it last beat"""
+    return conn.execute(
+        """
+        SELECT substr(name, length('worker-supervisor-') + 1) AS worker,
+            extract(epoch FROM now() - beat_at)::int AS seconds_ago
+        FROM heartbeats WHERE name LIKE 'worker-supervisor-%' ORDER BY name
+        """
+    ).fetchall()
+
+
+def get_jobs_after(conn: psycopg.Connection, job_id: int) -> list[dict]:
+    return conn.execute(
+        """
+        SELECT j.*, s.worksheet, s.config FROM jobs j JOIN sheets s ON s.id = j.sheet_id
+        WHERE j.id > %s ORDER BY j.id
+        """,
+        (job_id,),
+    ).fetchall()
+
+
+def get_running_jobs(conn: psycopg.Connection) -> list[dict]:
+    return conn.execute(
+        """
+        SELECT j.*, s.worksheet, s.config FROM jobs j JOIN sheets s ON s.id = j.sheet_id
+        WHERE j.status = 'running' ORDER BY j.id
+        """
+    ).fetchall()
+
+
 def get_open_shadow_jobs(conn: psycopg.Connection, sheet_id: int) -> list[dict]:
     return conn.execute(
         "SELECT * FROM shadow_jobs WHERE sheet_id = %s AND closed_at IS NULL ORDER BY id", (sheet_id,)
@@ -161,7 +220,12 @@ def close_shadow_job(conn: psycopg.Connection, shadow_job_id: int) -> None:
 
 
 def add_job(
-    conn: psycopg.Connection, sheet_id: int, row_number: int, url: str, domain: str, folder: str = ""
+    conn: psycopg.Connection,
+    sheet_id: int,
+    row_number: int,
+    url: str,
+    domain: str,
+    folder: str = "",
 ) -> int | None:
     """Adds a job and its Queued status. Returns the job id, or None if the row already has an active job"""
     with conn.transaction():
@@ -300,6 +364,14 @@ def discard_conflict(conn: psycopg.Connection, outbox_id: int) -> bool:
     return result.rowcount == 1
 
 
+def count_active_jobs(conn: psycopg.Connection) -> dict:
+    """How many jobs are queued and running, on every worker"""
+    rows = conn.execute(
+        "SELECT status, count(*) AS n FROM jobs WHERE status IN ('queued', 'running') GROUP BY status"
+    ).fetchall()
+    return {"queued": 0, "running": 0, **{row["status"]: row["n"] for row in rows}}
+
+
 def claim_job(conn: psycopg.Connection, worker: str) -> dict | None:
     """
     Claims the next job, or returns None if there isn't one. The sheet with the fewest running jobs for its weight
@@ -333,7 +405,7 @@ def claim_job(conn: psycopg.Connection, worker: str) -> dict | None:
             SELECT %(id)s, %(cells)s, %(queued)s
             WHERE NOT EXISTS (SELECT 1 FROM outbox WHERE job_id = %(id)s AND expected_status = %(queued)s)
             """,
-            {"id": job["id"], "cells": Jsonb({"status": STATUS_IN_PROGRESS}), "queued": STATUS_QUEUED},
+            {"id": job["id"], "cells": Jsonb({"status": in_progress_status(worker)}), "queued": STATUS_QUEUED},
         )
     return job
 

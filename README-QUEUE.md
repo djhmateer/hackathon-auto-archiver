@@ -158,4 +158,4 @@ Logs:
 
 - **Coordinator and worker supervisor:** `journalctl -u aa-coordinator -f` and `journalctl -u aa-worker-supervisor -f`
 - **Archiver:** `logs/`, such as `1debug.log` and `hangs.log`
-- **Errors during a job's setup:** `logs/child.out`
+- **Errors during a job's setup:** `logs/last-job-console.log`

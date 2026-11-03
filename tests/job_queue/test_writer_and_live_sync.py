@@ -85,7 +85,7 @@ def test_a_row_from_blank_through_to_its_result(conn, sheet_id, sheet, tab):
     job = claim(conn)
     assert job["url"] == URL
     run_writer(conn, sheet)
-    assert cell(tab, "B2") == "Archive in progress"
+    assert cell(tab, "B2") == "Archive in progress (vm1)"
 
     run_sync(conn, sheet)
     assert len(jobs(conn)) == 1, "a running job is left alone"
@@ -118,6 +118,18 @@ def test_client_clearing_a_finished_row_gets_a_new_job(conn, sheet_id, sheet, ta
     assert len(jobs(conn)) == 2
 
 
+def test_result_is_written_over_an_in_progress_row_from_before_worker_names(conn, sheet_id, sheet, tab):
+    run_sync(conn, sheet)
+    run_writer(conn, sheet)
+    job = claim(conn)
+    tab.rows[1] = row(status="Archive in progress")
+    db.mark_written(conn, [conn.execute("SELECT max(id) AS id FROM outbox").fetchone()["id"]])
+    db.finish_job(conn, job["id"], job["lease_token"], "done", {"status": "ok"})
+    run_writer(conn, sheet)
+    assert cell(tab, "B2") == "ok"
+    assert conflicts(conn) == []
+
+
 def test_one_cycle_takes_a_finished_job_through_all_its_entries_in_order(conn, sheet_id, sheet, tab):
     run_sync(conn, sheet)
     job = claim(conn)
@@ -125,7 +137,7 @@ def test_one_cycle_takes_a_finished_job_through_all_its_entries_in_order(conn, s
     assert run_writer(conn, sheet) == 3
     assert cell(tab, "B2") == "ok"
     statuses = [w[0][0]["values"][0][0] for w in tab.writes]
-    assert statuses == ["Queued", "Archive in progress", "ok"]
+    assert statuses == ["Queued", "Archive in progress (vm1)", "ok"]
 
 
 # sync's own rules, live
@@ -344,14 +356,19 @@ def test_existing_cells_are_kept_unless_overwriting_is_allowed(conn, config, she
     assert cell(tab, "E2") == "a link"
 
 
-def test_overwrite_setting_replaces_existing_cells(conn, config, sheet_id, sheet, tab):
+def test_overwrite_setting_replaces_existing_cells(conn, config, sheet_id, sheet, tab, caplog):
     config(allow_overwrite_of_spreadsheet_cells="true")
-    tab.rows[1] = row(title="the client's title")
+    tab.rows[1] = row(title="the client's title", archive="the same link")
     job_id = add_entry_job(conn, sheet_id)
     job = claim(conn)
-    db.finish_job(conn, job_id, job["lease_token"], "done", {"status": "ok", "title": "New"})
+    cells = {"status": "ok", "title": "New", "archive": "the same link"}
+    db.finish_job(conn, job_id, job["lease_token"], "done", cells)
+    caplog.clear()
     run_writer(conn, sheet)
     assert cell(tab, "D2") == "New"
+    # one line for the row, naming only the cell whose value changed
+    assert f"job {job_id}: wrote 'ok', replacing 1 changed cell(s): title" in caplog.text
+    assert "Overwriting spreadsheet cell" not in caplog.text
 
 
 def test_column_the_sheet_does_not_have_is_skipped(conn, sheet_id, sheet, tab):
@@ -422,7 +439,7 @@ def test_writer_logs_a_failed_row_as_a_warning(conn, sheet_id, sheet, tab, caplo
     run_writer(conn, sheet)
     assert cell(tab, "B2") == status
     assert [r.levelname for r in caplog.records if "wrote" in r.getMessage()] == ["WARNING"]
-    assert f"row 2: wrote '{status}'" in caplog.text
+    assert f"Sheet 'Example Sheet' tab Tab 1 row 2, job {job['id']}: wrote '{status}'" in caplog.text
 
 
 # moving a spreadsheet on and off the queue
@@ -433,7 +450,7 @@ def test_cancelling_a_job_requeued_after_a_claim_clears_the_row(conn, sheet_id, 
     run_writer(conn, sheet)
     job = claim(conn)
     run_writer(conn, sheet)
-    assert cell(tab, "B2") == "Archive in progress"
+    assert cell(tab, "B2") == "Archive in progress (vm1)"
     db.release_setup_failure(conn, job["id"], job["lease_token"])
     assert db.cancel_job(conn, job["id"])
     run_writer(conn, sheet)

@@ -56,6 +56,10 @@ def test_in_progress_status_with_no_job_raises_an_alert():
     assert kinds(decide([Row(2, URL, status="Archive in progress")], {})) == [ALERT]
 
 
+def test_in_progress_status_with_the_worker_name_and_no_job_raises_an_alert():
+    assert kinds(decide([Row(2, URL, status="Archive in progress (vm1)")], {})) == [ALERT]
+
+
 def test_in_progress_status_with_a_job_or_unwritten_entry_is_fine():
     running = RowState(job_id=1, job_status="running", job_url=URL)
     assert decide([Row(2, URL, status="Archive in progress")], {2: running}) == []

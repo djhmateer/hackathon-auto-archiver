@@ -99,7 +99,7 @@ def test_claim_adds_the_in_progress_status(conn):
     job_id = add_job(conn, add_sheet(conn))
     db.claim_job(conn, "vm1")
     entry = outbox(conn, job_id)[-1]
-    assert entry["cells"] == {"status": "Archive in progress"}
+    assert entry["cells"] == {"status": "Archive in progress (vm1)"}
     assert entry["expected_status"] == "Queued"
 
 
@@ -353,7 +353,7 @@ def test_reclaim_after_setup_failure_adds_no_second_in_progress(conn):
     make_available(conn, job_id)
     assert db.claim_job(conn, "vm1")["attempts"] == 1
     statuses = [e["cells"]["status"] for e in outbox(conn, job_id)]
-    assert statuses == ["Queued", "Archive in progress"]
+    assert statuses == ["Queued", "Archive in progress (vm1)"]
 
 
 def test_setup_failure_is_refused_once_work_has_started(conn):
@@ -444,3 +444,8 @@ def test_an_environment_variable_is_ignored(monkeypatch, tmp_path):
 def test_no_env_file_says_what_to_do(tmp_path):
     with pytest.raises(RuntimeError, match="add AA_DATABASE_URL"):
         db.database_url(tmp_path / "missing.env")
+
+
+def test_describe_database_leaves_out_the_password():
+    described = db.describe_database("postgresql://user1:secret@203.0.113.7:5433/db1")
+    assert described == "user1@203.0.113.7:5433/db1"

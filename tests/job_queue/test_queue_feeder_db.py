@@ -218,7 +218,7 @@ def run_for_real(conn, tmp_path, monkeypatch, database_url):
             time.sleep(0.2)
         if sup.running:
             sup.running.process.kill()
-        output = (tmp_path / "logs" / "child.out").read_text()[-3000:]
+        output = (tmp_path / "logs" / "last-job-console.log").read_text()[-3000:]
         pytest.fail(f"The jobs didn't finish. The child's output:\n{output}")
 
     return run
@@ -228,7 +228,7 @@ def test_real_child_archives_a_job_end_to_end(conn, run_for_real, tmp_path):
     sup, (job_id,) = run_for_real(["https://example.com/post/1"])
 
     current = db.get_job(conn, job_id)
-    assert current["status"] == "done", (tmp_path / "logs" / "child.out").read_text()[-3000:]
+    assert current["status"] == "done", (tmp_path / "logs" / "last-job-console.log").read_text()[-3000:]
     assert current["work_started_at"] is not None
     cells = conn.execute("SELECT cells FROM outbox ORDER BY id DESC LIMIT 1").fetchone()["cells"]
     assert cells["status"] == "fake_extractor: success"
@@ -262,7 +262,7 @@ def test_real_child_with_a_bad_config_is_a_setup_failure(conn, run_for_real, tmp
     current = db.get_job(conn, job_id)
     assert (current["status"], current["attempts"], current["work_started_at"]) == ("queued", 0, None)
     assert conn.execute("SELECT setup_failures FROM sheets").fetchone()["setup_failures"] == 1
-    assert (tmp_path / "logs" / "child.out").read_text() != ""
+    assert (tmp_path / "logs" / "last-job-console.log").read_text() != ""
 
 
 def test_real_child_killed_mid_job_has_its_processes_and_files_cleared(conn, run_for_real, tmp_path, mocker):
@@ -286,6 +286,6 @@ def test_real_child_killed_mid_job_has_its_processes_and_files_cleared(conn, run
     _, (job_id,) = run_for_real(["https://example.com/post/1"])
 
     current = db.get_job(conn, job_id)
-    assert current["status"] == "failed", (tmp_path / "logs" / "child.out").read_text()[-3000:]
+    assert current["status"] == "failed", (tmp_path / "logs" / "last-job-console.log").read_text()[-3000:]
     assert "killed" in current["error"]
     assert not (tmp_path / "tmp").exists()

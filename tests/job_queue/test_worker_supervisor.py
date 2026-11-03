@@ -122,6 +122,38 @@ def test_one_job_runs_at_a_time_and_the_rest_wait(conn, make_supervisor, childre
     assert conn.execute("SELECT count(*) AS n FROM jobs WHERE status = 'queued'").fetchone()["n"] == 2
 
 
+def test_idle_line_is_only_logged_when_it_changes(conn, make_supervisor, clock, caplog):
+    sup = make_supervisor()
+    sup.tick(conn)
+    clock.now += 600
+    sup.tick(conn)
+    assert caplog.text.count("Waiting for jobs: none to claim. On all workers 0 queued, 0 running") == 1
+
+    # a queued job it can't claim yet changes the line
+    add_job(conn, add_sheet(conn))
+    conn.execute("UPDATE jobs SET available_at = now() + interval '1 hour'")
+    sup.tick(conn)
+    assert "1 queued (waiting for a retry, or on a paused or disabled sheet)" in caplog.text
+
+
+def test_going_idle_again_after_a_job_is_logged(conn, make_supervisor, children, caplog):
+    sup = make_supervisor()
+    sup.tick(conn)
+    job_id = add_job(conn, add_sheet(conn))
+    sup.tick(conn)
+    db.finish_job(conn, job_id, sup.running.job["lease_token"], "done", {"status": "ok"})
+    children[0].exit_code = 0
+    sup.tick(conn)
+    assert caplog.text.count("Waiting for jobs: none to claim. On all workers 0 queued, 0 running") == 2
+
+
+def test_started_line_has_the_attempt_and_config(conn, make_supervisor, caplog):
+    add_job(conn, add_sheet(conn))
+    make_supervisor().tick(conn)
+    assert "attempt 1, config orchestration-example" in caplog.text
+    assert "orchestration-example.yaml" not in caplog.text
+
+
 def test_lease_is_renewed_every_minute(conn, make_supervisor, clock):
     job_id = add_job(conn, add_sheet(conn))
     sup = make_supervisor()
@@ -178,7 +210,7 @@ def test_exit_during_setup_logs_the_exit_code(conn, make_supervisor, children, c
     assert "exited during setup with code -11" in caplog.text
 
 
-def test_clean_finish_lets_it_claim_the_next_job(conn, make_supervisor, children):
+def test_clean_finish_lets_it_claim_the_next_job(conn, make_supervisor, children, caplog):
     sheet = add_sheet(conn)
     first = add_job(conn, sheet, 2)
     second = add_job(conn, sheet, 3)
@@ -190,6 +222,7 @@ def test_clean_finish_lets_it_claim_the_next_job(conn, make_supervisor, children
     sup.tick(conn)
     assert sup.running.job["id"] == second
     assert job(conn, first)["status"] == "done"
+    assert f"Finished job {first}: done in 0m 0s" in caplog.text
 
 
 def test_exit_during_setup_requeues_and_gives_back_the_attempt(conn, make_supervisor, children):
@@ -214,7 +247,7 @@ def test_exit_after_work_started_is_a_final_failure(conn, make_supervisor, child
     assert last_cells(conn, job_id)["status"] == "Archive failed - the archiver stopped unexpectedly - please rerun"
 
 
-def test_child_that_reported_its_own_failure_is_left_as_it_is(conn, make_supervisor, children):
+def test_child_that_reported_its_own_failure_is_left_as_it_is(conn, make_supervisor, children, caplog):
     job_id = add_job(conn, add_sheet(conn))
     sup = make_supervisor()
     sup.tick(conn)
@@ -224,6 +257,7 @@ def test_child_that_reported_its_own_failure_is_left_as_it_is(conn, make_supervi
     children[0].exit_code = 1
     sup.tick(conn)
     assert last_cells(conn, job_id)["status"] == "Archive failed its own reason"
+    assert f"Finished job {job_id}: failed in 0m 0s its own reason" in caplog.text
 
 
 def test_exit_after_the_job_was_taken_changes_nothing(conn, make_supervisor, children):
@@ -590,3 +624,20 @@ def test_kill_children_kills_a_child_and_its_grandchild_but_not_others(tmp_path)
         child.kill()
         other.wait()
         child.wait()
+
+
+def test_git_commit_shows_local_changes(mocker):
+    def fake_run(args, **kwargs):
+        output = {"rev-parse": "abc1234\n", "status": " M src/file.py\n"}[args[1]]
+        return mocker.Mock(stdout=output)
+
+    mocker.patch("auto_archiver.job_queue.worker_supervisor.subprocess.run", side_effect=fake_run)
+    assert worker_supervisor.git_commit() == "abc1234+changes"
+
+
+def test_git_commit_without_changes(mocker):
+    def fake_run(args, **kwargs):
+        return mocker.Mock(stdout={"rev-parse": "abc1234\n", "status": ""}[args[1]])
+
+    mocker.patch("auto_archiver.job_queue.worker_supervisor.subprocess.run", side_effect=fake_run)
+    assert worker_supervisor.git_commit() == "abc1234"

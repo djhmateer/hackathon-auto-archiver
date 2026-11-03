@@ -8,6 +8,7 @@ Each step has its own try/except, and Sheets calls have timeouts, so one failing
 
 import sys
 import time
+from dataclasses import dataclass, field
 
 import psycopg
 
@@ -16,8 +17,10 @@ from auto_archiver.utils.custom_logger import logger
 
 # an idle writer doesn't call Google, so this only costs local SQL
 CYCLE_SECONDS = 5
-# sync reads every sheet, so it runs less often. 30 is for testing: go back to 60 before moving the busy sheets
-SYNC_SECONDS = 30
+# sync reads every sheet, so it runs less often. 15 is for testing: go back to 60 before moving the busy sheets
+SYNC_SECONDS = 15
+# a worker beats every 2s, so this many seconds without one means it has stopped or lost Postgres
+WORKER_QUIET_SECONDS = 30
 
 
 def run_step(name: str, step) -> None:
@@ -33,9 +36,79 @@ def cleanup(conn) -> None:
         logger.warning(f"Cleanup requeued {requeued} job(s) with an expired lease and failed {failed}")
 
 
-def cycle(conn, sync_due: bool) -> None:
+def describe_job(job: dict) -> str:
+    config = db.describe_config(job["config"])
+    return (
+        f"job {job['id']} tab {job['worksheet']} ({config}) row {job['row_number']} folder '{job['folder']}' "
+        f"{job['url']}"
+    )
+
+
+@dataclass
+class Watcher:
+    """Logs what changed since the last cycle, so the coordinator's output shows what the workers are doing"""
+
+    started: bool = False
+    workers_up: set = field(default_factory=set)
+    last_job_id: int = 0
+    running: dict = field(default_factory=dict)  # job id -> job, as last seen running
+
+    def watch(self, conn) -> None:
+        if not self.started:
+            # only log what happens from now on, not every job there has ever been
+            jobs = db.get_jobs_after(conn, 0)
+            self.last_job_id = jobs[-1]["id"] if jobs else 0
+            self.running = {job["id"]: job for job in db.get_running_jobs(conn)}
+            self.started = True
+        self._watch_workers(conn)
+        self._watch_jobs(conn)
+
+    def _watch_workers(self, conn) -> None:
+        for beat in db.get_worker_heartbeats(conn):
+            worker, seconds_ago = beat["worker"], beat["seconds_ago"]
+            if seconds_ago < WORKER_QUIET_SECONDS and worker not in self.workers_up:
+                logger.info(f"Worker {worker} is up")
+                self.workers_up.add(worker)
+            elif seconds_ago >= WORKER_QUIET_SECONDS and worker in self.workers_up:
+                logger.warning(f"Worker {worker} has gone quiet: no heartbeat for {seconds_ago}s")
+                self.workers_up.discard(worker)
+
+    def _watch_jobs(self, conn) -> None:
+        for job in db.get_jobs_after(conn, self.last_job_id):
+            if job["status"] == "rejected":
+                logger.info(f"Rejected {describe_job(job)}: {job['error']}")
+            else:
+                logger.info(f"Queued {describe_job(job)}")
+            self.last_job_id = job["id"]
+
+        running = {job["id"]: job for job in db.get_running_jobs(conn)}
+        for job_id, job in running.items():
+            if job_id not in self.running:
+                # started_at is the first claim, so this is only the wait for the first attempt
+                waited = int((job["started_at"] - job["added_at"]).total_seconds())
+                logger.info(
+                    f"Worker {job['worker']} claimed {describe_job(job)}, attempt {job['attempts']}"
+                    + (f", waited {waited}s in the queue" if job["attempts"] == 1 else "")
+                )
+        for job_id, job in self.running.items():
+            if job_id not in running:
+                current = db.get_job(conn, job_id)
+                status = current["status"] if current else "gone"
+                detail = f": {current['error']}" if current and current["error"] else ""
+                if status == "done":
+                    cells = db.get_last_cells(conn, job_id)
+                    detail = f": archive {cells.get('archive', '')}, title {cells.get('title', '')!r}"
+                log = logger.info if status == "done" else logger.warning
+                log(f"Job {job_id} on worker {job['worker']} is now {status}{detail}")
+        self.running = running
+
+
+def cycle(conn, sync_due: bool, watcher: Watcher = None) -> None:
     if sync_due:
         run_step("sync", lambda: sync.sync_cycle(conn))
+    # before the writer, so a job's "Queued" and "claimed" lines come before the writer's lines for it
+    if watcher is not None:
+        run_step("watch", lambda: watcher.watch(conn))
     run_step("writer", lambda: writer.writer_cycle(conn))
     run_step("cleanup", lambda: cleanup(conn))
     db.beat(conn, "coordinator")
@@ -66,6 +139,11 @@ def log_startup(conn) -> None:
             f"Tab {sheet['worksheet']} (sheet {sheet['id']}, {'live' if sheet['enabled'] else 'shadow'}{paused}): "
             f"spreadsheet {sheet['spreadsheet_id']}, config {sheet['config']}"
         )
+    beats = db.get_worker_heartbeats(conn)
+    if not beats:
+        logger.info("No worker has ever sent a heartbeat")
+    for beat in beats:
+        logger.info(f"Worker {beat['worker']}: last heartbeat {beat['seconds_ago']}s ago")
     summary = db.get_queue_summary(conn)
     logger.info(
         f"Queue: {summary['queued']} queued, {summary['running']} running, {summary['unwritten']} sheet writes to do, "
@@ -85,12 +163,13 @@ def main() -> None:
         sys.exit(1)
 
     last_sync = 0
+    watcher = Watcher()
     while True:
         try:
             # a new connection each time, so a Postgres restart only loses one cycle
             with db.connect() as conn:
                 sync_due = time.monotonic() - last_sync >= SYNC_SECONDS
-                cycle(conn, sync_due)
+                cycle(conn, sync_due, watcher)
                 if sync_due:
                     last_sync = time.monotonic()
         except Exception as e:

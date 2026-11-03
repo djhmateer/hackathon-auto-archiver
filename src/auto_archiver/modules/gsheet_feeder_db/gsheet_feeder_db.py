@@ -95,10 +95,10 @@ def build_result_cells(item: Metadata, cached: bool = False) -> dict:
     return cells
 
 
-def cells_to_write(cells: dict, col_exists, existing_value, allow_overwrite: bool) -> dict:
+def cells_to_write(cells: dict, col_exists, existing_value, allow_overwrite: bool, log_overwrites: bool = True) -> dict:
     """
     Which of a row's cells to write, given the sheet as it is now. Status is always written. Other cells need their
-    column to exist, and an empty cell unless overwriting is allowed
+    column to exist, and an empty cell unless overwriting is allowed. The job queue's writer logs overwrites itself
     """
     to_write = {}
     for col, val in cells.items():
@@ -113,7 +113,8 @@ def cells_to_write(cells: dict, col_exists, existing_value, allow_overwrite: boo
             if existing := existing_value(col):
                 if not allow_overwrite:
                     continue
-                logger.info(f"Overwriting spreadsheet cell {col}={existing} with {val}")
+                if log_overwrites:
+                    logger.info(f"Overwriting spreadsheet cell {col}={existing} with {val}")
             to_write[col] = val
         except Exception as e:
             logger.error(f"Unable to batch {col}={val} due to {e}")

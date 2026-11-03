@@ -34,6 +34,14 @@ def test_env_file(tmp_path, monkeypatch):
     (tmp_path / ".env").write_text(f"AA_DATABASE_URL={TEST_URL}\n")
 
 
+@pytest.fixture(autouse=True)
+def fresh_sync_logs():
+    """sync only logs a line when it changes, so each test starts with nothing logged"""
+    from auto_archiver.job_queue import sync
+
+    sync._last_logged.clear()
+
+
 @pytest.fixture
 def database_url() -> str:
     return TEST_URL

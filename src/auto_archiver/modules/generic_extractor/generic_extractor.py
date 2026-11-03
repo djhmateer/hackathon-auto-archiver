@@ -4,6 +4,7 @@ import shutil
 import sys
 import datetime
 import os
+import mimetypes
 import re
 import importlib
 import subprocess
@@ -578,7 +579,10 @@ class GenericExtractor(Extractor):
                     # file was not downloaded or could not be retrieved, example: sensitive videos on YT without using cookies.
                     continue
 
-                logger.debug(f"Using filename {filename} for entry {entry.get('id', 'unknown')}")
+                logger.info(
+                    f"Downloaded {os.path.basename(filename)}, type {mimetypes.guess_type(filename)[0] or 'unknown'}, "
+                    f"for entry {entry.get('id', 'unknown')}"
+                )
 
                 new_media = Media(filename)
                 for x in ["duration", "original_url", "fulltitle", "description", "upload_date"]:

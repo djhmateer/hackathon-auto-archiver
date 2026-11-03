@@ -90,3 +90,77 @@ def test_coordinator_will_not_start_without_the_database(mocker, monkeypatch, ca
         coordinator.main()
     assert "can't read the database" in caplog.text
     cycle.assert_not_called()
+
+
+# the watcher's log lines
+
+
+def add_sheet(conn) -> int:
+    return conn.execute(
+        """
+        INSERT INTO sheets (spreadsheet_id, worksheet_gid, worksheet, config, enabled)
+        VALUES ('spreadsheet1', 1, 'tab1', 'config.yaml', true) RETURNING id
+        """
+    ).fetchone()["id"]
+
+
+def test_worker_is_logged_once_when_it_appears_and_when_it_goes_quiet(conn, caplog):
+    watcher = coordinator.Watcher()
+    db.beat(conn, "worker-supervisor-vm1")
+    watcher.watch(conn)
+    watcher.watch(conn)
+    assert caplog.text.count("Worker vm1 is up") == 1
+
+    conn.execute("UPDATE heartbeats SET beat_at = now() - interval '45 seconds'")
+    watcher.watch(conn)
+    watcher.watch(conn)
+    assert caplog.text.count("Worker vm1 has gone quiet: no heartbeat for 45s") == 1
+
+    db.beat(conn, "worker-supervisor-vm1")
+    watcher.watch(conn)
+    assert caplog.text.count("Worker vm1 is up") == 2
+
+
+def test_jobs_from_before_startup_are_not_logged(conn, caplog):
+    db.add_job(conn, add_sheet(conn), 2, "https://example.com/post/1", "example.com")
+    coordinator.Watcher().watch(conn)
+    assert "Queued job" not in caplog.text
+
+
+def test_a_job_is_logged_when_queued_claimed_and_finished(conn, caplog):
+    sheet = add_sheet(conn)
+    watcher = coordinator.Watcher()
+    watcher.watch(conn)
+
+    job_id = db.add_job(conn, sheet, 2, "https://example.com/post/1", "example.com")
+    watcher.watch(conn)
+    queued = f"Queued job {job_id} tab tab1 (config) row 2 folder '' https://example.com/post/1"
+    assert queued in caplog.text
+
+    conn.execute("UPDATE jobs SET available_at = now() - interval '1 minute'")
+    job = db.claim_job(conn, "vm1")
+    watcher.watch(conn)
+    assert f"Worker vm1 claimed job {job_id} tab tab1 (config) row 2" in caplog.text
+    assert "attempt 1, waited " in caplog.text
+
+    cells = {"status": "ok", "archive": "https://example.com/archive/1", "title": "a title"}
+    db.finish_job(conn, job_id, job["lease_token"], "done", cells)
+    watcher.watch(conn)
+    assert (
+        f"Job {job_id} on worker vm1 is now done: archive https://example.com/archive/1, title 'a title'" in caplog.text
+    )
+
+
+def test_a_rejected_row_is_logged_with_its_reason(conn, caplog):
+    sheet = add_sheet(conn)
+    watcher = coordinator.Watcher()
+    watcher.watch(conn)
+    db.add_rejected_job(conn, sheet, 2, "not a url", "WARNING: not a valid URL")
+    watcher.watch(conn)
+    assert "row 2 folder '' not a url: WARNING: not a valid URL" in caplog.text
+
+
+def test_startup_lists_the_workers(conn, caplog):
+    db.beat(conn, "worker-supervisor-vm1")
+    coordinator.log_startup(conn)
+    assert "Worker vm1: last heartbeat 0s ago" in caplog.text

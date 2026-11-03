@@ -33,6 +33,7 @@ READ_ONLY_SCOPES = [
 ]
 SHEETS_TIMEOUT_SECONDS = 60
 SYNC_INTERVAL_SECONDS = 60
+OPTIONAL_COLUMNS = ("folder",)
 
 ADD = "add"
 REJECT = "reject"
@@ -70,6 +71,21 @@ class Action:
     folder: str = ""
     message: str = None
     job_id: int = None
+
+
+# what was last logged for each key, so a line that's the same every cycle is only logged when it changes
+_last_logged = {}
+
+
+def log_on_change(key, message: str) -> None:
+    if _last_logged.get(key) != message:
+        # depth=1, so the line shows the function that called this
+        logger.opt(depth=1).info(message)
+        _last_logged[key] = message
+
+
+def describe_tab(spreadsheet_name: str, tab_title: str) -> str:
+    return f"Sheet '{spreadsheet_name}' tab {tab_title}"
 
 
 def tab_folder(raw_folder: str, spreadsheet_name: str, tab_title: str, use_sheet_names: bool) -> str:
@@ -119,7 +135,7 @@ def decide(
             else:
                 folder = tab_folder(row.folder, spreadsheet_name, tab_title, use_sheet_names)
                 actions.append(Action(ADD, row.number, row.url, domain=hostname, folder=folder))
-        elif row.status in (db.STATUS_QUEUED, db.STATUS_IN_PROGRESS) and not blocked:
+        elif (row.status == db.STATUS_QUEUED or db.is_in_progress(row.status)) and not blocked:
             # rule 3, unless the job's last write came after this read, so the row has already moved on
             if state.written_since_snapshot:
                 continue
@@ -190,16 +206,25 @@ def read_tabs(spreadsheet, tabs: list, settings: dict) -> dict[int, list[Row]]:
         names = [str(name).lower() for name in (_values(value_range) or [[]])[0]]
         positions = {
             col: names.index(columns[col].lower()) + 1
-            for col in ("url", "status", "folder")
+            for col in ("url", "status", *OPTIONAL_COLUMNS)
             if col in columns and columns[col].lower() in names
         }
         if "url" not in positions or "status" not in positions:
             # none of them is just a helper tab, but only one probably means a renamed or deleted header
             if ("url" in positions) != ("status" in positions):
-                logger.warning(f"Skipped tab {tab.title} as it is missing its url or status column")
+                logger.warning(
+                    f"Skipped {describe_tab(spreadsheet.title, tab.title)} as it is missing its url or status column"
+                )
             else:
-                logger.info(f"Skipped tab {tab.title} as it has no url or status column")
+                logger.info(f"Skipped {describe_tab(spreadsheet.title, tab.title)} as it has no url or status column")
             continue
+        found = [f"'{columns[col]}'" for col in positions]
+        missing = [f"'{columns[col]}'" for col in OPTIONAL_COLUMNS if col in columns and col not in positions]
+        log_on_change(
+            (tab.id, "columns"),
+            f"{describe_tab(spreadsheet.title, tab.title)}: reading the {', '.join(found)} columns"
+            + (f", there's no {', '.join(missing)} column" if missing else ""),
+        )
         wanted.append((tab, positions))
         for position in positions.values():
             letter = gspread_utils.rowcol_to_a1(1, position)[:-1]
@@ -312,7 +337,8 @@ def sync_cycle(conn, opener=open_spreadsheet) -> None:
                     and sheet["worksheet_gid"] not in allowed_ids
                 ):
                     logger.warning(
-                        f"Tab {sheet['worksheet']} (sheet {sheet['id']}) is not being read: it was deleted, "
+                        f"{describe_tab(spreadsheet.title, sheet['worksheet'])} (sheet {sheet['id']}) is not being read: "
+                        f"it was deleted, "
                         f"or renamed or blocked so that {config_path} doesn't allow it"
                     )
 
@@ -328,12 +354,18 @@ def sync_cycle(conn, opener=open_spreadsheet) -> None:
                 blank = sum(row.status in ("", None) for row in rows)
                 if sheet["enabled"]:
                     live_tab(conn, sheet["id"], rows, snapshot_at, name, title, settings)
-                    logger.info(f"Tab {title} (live): {len(rows)} row(s) with a URL, {blank} blank status")
+                    log_on_change(
+                        gid,
+                        f"{describe_tab(spreadsheet.title, title)} (live): {len(rows)} row(s) with a URL, "
+                        f"{blank} blank status",
+                    )
                 else:
                     shadow_tab(conn, sheet["id"], rows, name, title, settings)
                     still_open = len(db.get_open_shadow_jobs(conn, sheet["id"]))
-                    logger.info(
-                        f"Tab {title} (shadow): {len(rows)} row(s) with a URL, {blank} blank status, {still_open} open"
+                    log_on_change(
+                        gid,
+                        f"{describe_tab(spreadsheet.title, title)} (shadow): {len(rows)} row(s) with a URL, "
+                        f"{blank} blank status, {still_open} open",
                     )
         except Exception as e:
             logger.error(f"Sync of config {config_path} failed: {e}")

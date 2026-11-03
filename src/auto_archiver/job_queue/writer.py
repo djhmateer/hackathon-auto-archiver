@@ -16,7 +16,7 @@ import time
 from gspread import utils as gspread_utils
 
 from auto_archiver.job_queue import db
-from auto_archiver.job_queue.sync import load_settings, open_spreadsheet
+from auto_archiver.job_queue.sync import describe_tab, load_settings, open_spreadsheet
 from auto_archiver.modules.gsheet_feeder_db.gsheet_feeder_db import cells_to_write
 from auto_archiver.utils.custom_logger import logger
 
@@ -49,7 +49,9 @@ def _check_row(entry: dict, current_url: str, current_status: str) -> tuple[bool
         return True, None
     if not url_ok:
         return False, f"Job {entry['job_id']} row {entry['row_number']}: the URL has changed"
-    if current_status != entry["expected_status"]:
+    # entries expect the plain in progress status, and the sheet has the worker's name after it
+    status = db.STATUS_IN_PROGRESS if db.is_in_progress(current_status) else current_status
+    if status != entry["expected_status"]:
         return (
             False,
             f"Job {entry['job_id']} row {entry['row_number']}: "
@@ -58,13 +60,18 @@ def _check_row(entry: dict, current_url: str, current_status: str) -> tuple[bool
     return False, None
 
 
-def _log_written(entry: dict) -> None:
+def _log_written(entry: dict, spreadsheet_name: str, tab_title: str, changed: list[str]) -> None:
+    """changed: the cells that had a different value, which were overwritten"""
     status = entry["cells"].get("status", "")
     log = logger.warning if status.startswith("Archive failed") else logger.info
-    log(f"Job {entry['job_id']} row {entry['row_number']}: wrote {status!r}")
+    replaced = f", replacing {len(changed)} changed cell(s): {', '.join(changed)}" if changed else ""
+    log(
+        f"{describe_tab(spreadsheet_name, tab_title)} row {entry['row_number']}, job {entry['job_id']}: "
+        f"wrote {status!r}{replaced}"
+    )
 
 
-def _write_tab(conn, tab, entries: list[dict], settings: dict, read_ranges) -> int:
+def _write_tab(conn, tab, entries: list[dict], settings: dict, read_ranges, spreadsheet_name: str) -> int:
     """Checks then writes one tab's entries, with one read for the headers, one for the rows and one write"""
     header, columns = settings["header"], settings["columns"]
     names = [str(name).lower() for name in (read_ranges([f"{header}:{header}"], tab)[0].get("values") or [[]])[0]]
@@ -93,16 +100,21 @@ def _write_tab(conn, tab, entries: list[dict], settings: dict, read_ranges) -> i
         written.append(entry["id"])
         if already_written:
             continue
-        logged.append(entry)
         to_write = cells_to_write(
             entry["cells"],
             lambda col: col in positions,
             lambda col: current.get(col, ""),
             settings["allow_overwrite"],
+            log_overwrites=False,
         )
+        changed = [c for c, v in to_write.items() if c != "status" and current.get(c, "") not in ("", str(v))]
+        logged.append((entry, changed))
         for col, val in to_write.items():
             if len(str(val)) > MAX_CELL_LENGTH:
-                logger.warning(f"Truncating {col} in job {entry['job_id']} from {len(str(val))} characters")
+                logger.warning(
+                    f"{describe_tab(spreadsheet_name, tab.title)} row {entry['row_number']}, job {entry['job_id']}: "
+                    f"truncating {col} from {len(str(val))} characters"
+                )
             updates.append(
                 {"range": f"{_letter(positions[col])}{entry['row_number']}", "values": [[str(val)[:MAX_CELL_LENGTH]]]}
             )
@@ -111,8 +123,8 @@ def _write_tab(conn, tab, entries: list[dict], settings: dict, read_ranges) -> i
         tab.batch_update(updates, value_input_option="USER_ENTERED")
     if written:
         db.mark_written(conn, written)
-    for entry in logged:
-        _log_written(entry)
+    for entry, changed in logged:
+        _log_written(entry, spreadsheet_name, tab.title, changed)
     return len(written)
 
 
@@ -136,7 +148,7 @@ def _write_spreadsheet(conn, spreadsheet_id: str, config_path: str, entries: lis
             for entry in tab_entries:
                 db.set_conflict(conn, entry["id"], f"Job {entry['job_id']}: the tab has been deleted")
             continue
-        written += _write_tab(conn, tabs[gid], tab_entries, settings, read_ranges)
+        written += _write_tab(conn, tabs[gid], tab_entries, settings, read_ranges, spreadsheet.title)
     return written
 
 

@@ -24,7 +24,7 @@ from zoneinfo import ZoneInfo
 from auto_archiver.job_queue import db
 from auto_archiver.utils.custom_logger import logger
 
-TICK_SECONDS = 5
+TICK_SECONDS = 2
 RENEW_SECONDS = 60
 # the child's ROW_KILL_SECONDS (3 h) goes first, as it can report the failure. This is the backstop
 TIME_LIMIT_SECONDS = 3 * 60 * 60 + 5 * 60
@@ -34,6 +34,9 @@ PAUSE_SECONDS = 15 * 60
 FORCE_REBOOT_AFTER_SECONDS = 60 * 60
 REBOOT_TIMEZONE = ZoneInfo("Europe/London")
 ARCHIVER_PATH = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+# the archiver's console output for the last job only, at ERROR: setup errors, which happen before its logs are set
+# up, and crashes. Everything else is in 1debug.log
+CONSOLE_LOG = "last-job-console.log"
 
 
 def run_docker(*args: str) -> str:
@@ -78,7 +81,7 @@ def _die_with_parent() -> None:
 def start_child(job: dict, worker_dir: str, extra_args: tuple = ()) -> subprocess.Popen:
     args = [
         sys.executable,
-        # a native crash prints its stack to child.out, instead of nothing
+        # a native crash prints its stack to the console log, instead of nothing
         "-X",
         "faulthandler",
         ARCHIVER_PATH,
@@ -94,12 +97,13 @@ def start_child(job: dict, worker_dir: str, extra_args: tuple = ()) -> subproces
         # use it: it writes 1debug.log and the others to logs/
         "--logging.each_level_in_separate_file=true",
         f"--logging.file={os.path.join(worker_dir, 'logs', 'archiver.log')}",
+        # the console only, so the console log isn't a copy of 1debug.log. The log files keep their own levels
+        "--logging.level=ERROR",
         *extra_args,
     ]
     env = {**os.environ, "AA_WORKER_DIR": worker_dir, "AA_JOB_ID": str(job["id"])}
-    # only the last job's, for setup errors which happen before the logs are set up
     os.makedirs(os.path.join(worker_dir, "logs"), exist_ok=True)
-    with open(os.path.join(worker_dir, "logs", "child.out"), "w") as output:
+    with open(os.path.join(worker_dir, "logs", CONSOLE_LOG), "w") as output:
         return subprocess.Popen(
             args, env=env, stdout=output, stderr=subprocess.STDOUT, preexec_fn=_die_with_parent, start_new_session=True
         )
@@ -115,6 +119,27 @@ def boot_time() -> datetime:
             if line.startswith("btime"):
                 return datetime.fromtimestamp(int(line.split()[1]), timezone.utc)
     raise RuntimeError("No boot time in /proc/stat")
+
+
+def git_commit() -> str:
+    """The commit this code is at, with +changes if tracked files have been edited, so the logs show what ran"""
+
+    def git(*args: str) -> str:
+        return subprocess.run(["git", *args], capture_output=True, text=True, timeout=10, cwd=ARCHIVER_PATH).stdout
+
+    try:
+        commit = git("rev-parse", "--short", "HEAD").strip()
+        if not commit:
+            return "unknown"
+        # untracked files left out, as logs and tmp files would always count
+        return commit + ("+changes" if git("status", "--porcelain", "--untracked-files=no").strip() else "")
+    except (OSError, subprocess.SubprocessError):
+        return "unknown"
+
+
+def describe_duration(seconds: float) -> str:
+    minutes, seconds = divmod(int(seconds), 60)
+    return f"{minutes}m {seconds}s"
 
 
 def describe_job(job: dict) -> str:
@@ -158,6 +183,7 @@ class WorkerSupervisor:
         self.paused_until = 0
         self.pause_alerted = False
         self.quick_failures = []  # the sheet of each quick failure in a row
+        self.idle_logged = None  # the last "Waiting for jobs" line, so it's only logged again when it changes
 
     def clear_leftovers(self) -> None:
         """At startup: a child and crawls from a supervisor that died. Its job comes back when the lease expires"""
@@ -216,8 +242,10 @@ class WorkerSupervisor:
         if running.stolen or not ours:
             logger.warning(f"Job {job['id']} now belongs to another worker, leaving it alone")
         elif current["status"] == "done":
+            logger.info(f"Finished job {job['id']}: done in {describe_duration(ran_for)}")
             self.quick_failures, self.pause_alerted = [], False
         elif current["status"] == "failed":
+            logger.warning(f"Finished job {job['id']}: failed in {describe_duration(ran_for)} {current['error']}")
             self._record_failure(conn, job, ran_for)
         elif running.kill_reason:
             self._fail(conn, job, running.kill_reason)
@@ -225,7 +253,7 @@ class WorkerSupervisor:
         elif current["work_started_at"] is None:
             # negative is the signal that killed it. It may have had no chance to log anything
             code = running.process.poll()
-            logger.error(f"Job {job['id']} exited during setup with code {code}, see {self.dir}/logs/child.out")
+            logger.error(f"Job {job['id']} exited during setup with code {code}, see {self.dir}/logs/{CONSOLE_LOG}")
             db.release_setup_failure(conn, job["id"], job["lease_token"])
             self._record_quick_failure(job["sheet_id"], conn)
         else:
@@ -290,6 +318,16 @@ class WorkerSupervisor:
     def _claim(self, conn) -> None:
         job = db.claim_job(conn, self.worker)
         if job is None:
+            counts = db.count_active_jobs(conn)
+            # queued jobs it can't claim are waiting for a retry, or on a paused or disabled sheet
+            why = " (waiting for a retry, or on a paused or disabled sheet)" if counts["queued"] else ""
+            message = (
+                f"Waiting for jobs: none to claim. On all workers {counts['queued']} queued{why}, "
+                f"{counts['running']} running"
+            )
+            if message != self.idle_logged:
+                logger.info(message)
+                self.idle_logged = message
             return
         run_docker("rm", "-f", f"aa-job-{job['id']}")  # a retry reuses the name
         try:
@@ -299,7 +337,8 @@ class WorkerSupervisor:
             db.release_setup_failure(conn, job["id"], job["lease_token"])
             raise
         self.running = RunningJob(job, process, self.clock(), self.clock())
-        logger.info(f"Started {describe_job(job)}")
+        self.idle_logged = None  # so going idle again after this job is logged
+        logger.info(f"Started {describe_job(job)}, attempt {job['attempts']}, config {db.describe_config(job['config'])}")
 
     def tick(self, conn) -> None:
         if self.running is not None:
@@ -317,6 +356,12 @@ class WorkerSupervisor:
 
     def run(self) -> None:
         self.clear_leftovers()
+        logger.info(
+            f"Started worker {self.worker}, pid {os.getpid()}, code {git_commit()}, database {db.describe_database()}, "
+            f"in {self.dir}, checking every {TICK_SECONDS}s, daily reboot at {self.reboot_at or 'never'}. "
+            f"Archiver logs in {os.path.join(self.dir, 'logs')}: 1debug.log, and {CONSOLE_LOG} for console output: "
+            "setup errors and crashes"
+        )
 
         def drain(signum, frame):
             self.draining = True  # logged in the loop, as loguru can raise if a signal interrupts a log call

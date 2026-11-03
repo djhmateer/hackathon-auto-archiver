@@ -260,3 +260,24 @@ def test_google_connection_is_read_only(mocker):
     sync.open_spreadsheet({"service_account": "account.json", "sheet_id": "spreadsheet1", "sheet": None})
     scopes = connect.call_args.kwargs["scopes"]
     assert scopes and all(scope.endswith(".readonly") for scope in scopes)
+
+
+def test_columns_found_are_logged_once(conn, config, caplog):
+    sheet = FakeSpreadsheet([tab_of(row("https://example.com/1"))])
+    setup_sheet(conn, sheet)
+    run(conn, sheet)
+    run(conn, sheet)
+    line = "Sheet 'Example Sheet' tab Tab 1: reading the 'link', 'archive status', 'destination folder' columns"
+    assert caplog.text.count(line) == 1
+
+
+def test_tab_summary_is_only_logged_when_it_changes(conn, config, caplog):
+    tab = tab_of(row("https://example.com/1"))
+    sheet = FakeSpreadsheet([tab])
+    setup_sheet(conn, sheet)
+    run(conn, sheet)
+    run(conn, sheet)
+    assert caplog.text.count("row(s) with a URL") == 1
+    tab.rows.append(row("https://example.com/2"))
+    run(conn, sheet)
+    assert "Sheet 'Example Sheet' tab Tab 1 (shadow): 2 row(s) with a URL" in caplog.text
