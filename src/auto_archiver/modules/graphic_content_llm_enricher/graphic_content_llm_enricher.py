@@ -168,6 +168,8 @@ class GraphicContentLlmEnricher(Enricher):
             "prompt": prompt,
             "images": [image] if image else [],
             "stream": False,
+            # Ollama unloads an idle model after 5 minutes, and reloading the 30B model slows the next row's first call
+            "keep_alive": "30m",
             "options": {"num_ctx": 32768, "num_predict": 6000, "temperature": 0, "num_thread": self.threads},
         }
         if self.think:

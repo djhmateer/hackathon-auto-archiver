@@ -221,6 +221,7 @@ def test_threads_sent_on_every_call(enricher, mocker):
 
     body = __import__("json").loads(urlopen.call_args.args[0].data)
     assert body["options"]["num_thread"] == 6
+    assert body["keep_alive"] == "30m"
 
 
 def test_html_blurs_descriptions_of_graphic_images(setup_module, tmp_path):
