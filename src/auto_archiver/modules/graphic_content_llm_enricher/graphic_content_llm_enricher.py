@@ -8,6 +8,7 @@ import hashlib
 import io
 import json
 import os
+import platform
 import re
 import time
 import urllib.request
@@ -50,6 +51,12 @@ else upsetting. Just call them distressing. Reply with the paragraph only.
 
 
 class GraphicContentLlmEnricher(Enricher):
+    def setup(self) -> None:
+        # the dev machine (WSL2, eg kernel 5.15.167.4-microsoft-standard-WSL2) reaches the LLM on another address
+        if self.ollama_url_dev and "microsoft" in platform.release().lower():
+            self.ollama_url = self.ollama_url_dev
+        logger.info(f"Graphic content LLM at {self.ollama_url}")
+
     def enrich(self, to_enrich: Metadata) -> None:
         media = [m for m in to_enrich.media if (m.is_image() or m.is_video()) and "screenshot" not in m.get("id", "")]
         # a video is rated on its first frame, which the browser shows before it plays. Videos go first as they are

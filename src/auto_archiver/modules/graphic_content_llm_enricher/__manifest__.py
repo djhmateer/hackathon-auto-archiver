@@ -5,6 +5,10 @@
     "dependencies": {"python": ["loguru", "PIL", "ffmpeg"], "bin": ["ffmpeg"]},
     "configs": {
         "ollama_url": {"default": "http://localhost:11434", "help": "Ollama server URL"},
+        "ollama_url_dev": {
+            "default": "",
+            "help": "Ollama server URL used instead of ollama_url on the dev machine (detected by a WSL2 kernel)",
+        },
         "model": {"default": "muse-glimmer:30b-q4_K_M", "help": "Ollama vision model"},
         "think": {"default": "low", "help": "reasoning effort sent to Ollama, empty for the model's default"},
         "threads": {

@@ -264,3 +264,14 @@ def test_duplicate_files_are_rated_once(enricher, tmp_path, mocker):
     assert item.media[2].get("graphic_seconds") == 0
     assert item.get("graphic_rating") == 4
     assert ask.call_args_list[1].args[0].count("rating 4") == 1
+
+
+@pytest.mark.parametrize(
+    "kernel, expected",
+    [("5.15.167.4-microsoft-standard-WSL2", "http://dev:11434"), ("6.8.0-48-generic", "http://prod:11434")],
+)
+def test_dev_machine_uses_dev_url(setup_module, mocker, kernel, expected):
+    mocker.patch("platform.release", return_value=kernel)
+    config = {"ollama_url": "http://prod:11434", "ollama_url_dev": "http://dev:11434"}
+
+    assert setup_module("graphic_content_llm_enricher", config).ollama_url == expected
