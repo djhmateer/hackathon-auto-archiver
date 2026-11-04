@@ -224,6 +224,20 @@ def test_threads_sent_on_every_call(enricher, mocker):
     assert body["keep_alive"] == "30m"
 
 
+def test_ollama_timings_logged(enricher, mocker):
+    urlopen = mocker.patch("urllib.request.urlopen")
+    urlopen.return_value.__enter__.return_value.read.return_value = (
+        b'{"response": "RATING: 1", "load_duration": 2500000000, "prompt_eval_count": 1200, '
+        b'"prompt_eval_duration": 30000000000, "eval_count": 800, "eval_duration": 100000000000}'
+    )
+    debug = mocker.patch("auto_archiver.modules.graphic_content_llm_enricher.graphic_content_llm_enricher.logger.debug")
+
+    assert enricher.ask("prompt", "aW1hZ2U=") == "RATING: 1"
+    debug.assert_called_once_with(
+        "Ollama: load 2.5 s, prompt 1200 tokens in 30.0 s, output 800 tokens in 100.0 s (8.0 tokens/s)"
+    )
+
+
 def test_html_blurs_descriptions_of_graphic_images(setup_module, tmp_path):
     item = make_item(tmp_path, 2)
     item.media[0].set("graphic_rating", 2).set("graphic_description", "People grieving.")

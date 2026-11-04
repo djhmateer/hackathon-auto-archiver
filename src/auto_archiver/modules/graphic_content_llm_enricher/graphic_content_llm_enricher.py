@@ -180,7 +180,16 @@ class GraphicContentLlmEnricher(Enricher):
             headers={"Content-Type": "application/json"},
         )
         with urllib.request.urlopen(request, timeout=TIMEOUT_SECONDS) as response:
-            return json.load(response)["response"]
+            result = json.load(response)
+        # Ollama's own timings (in nanoseconds): where the time goes. Output tokens include the thinking
+        seconds = {k: round(result.get(k, 0) / 1e9, 1) for k in ("load_duration", "prompt_eval_duration", "eval_duration")}
+        output = result.get("eval_count", 0)
+        logger.debug(
+            f"Ollama: load {seconds['load_duration']} s, prompt {result.get('prompt_eval_count', 0)} tokens in "
+            f"{seconds['prompt_eval_duration']} s, output {output} tokens in {seconds['eval_duration']} s "
+            f"({round(output / seconds['eval_duration'], 1) if seconds['eval_duration'] else 0} tokens/s)"
+        )
+        return result["response"]
 
 
 def file_sha256(filename: str) -> str:
