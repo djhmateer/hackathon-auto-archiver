@@ -118,7 +118,8 @@ bash scripts/job_queue/deploy-coordinator.sh --reset-except-sheets   # the same,
 
 It stops at the first step that fails, which leaves the coordinator stopped.
 
-After migrating, `--reset-except-sheets` empties `job_files`, `sheet_writes`, `jobs`, `drive_folders`, `admin_alerts` and `heartbeats`, and restarts their ids from 1. It keeps `sheets`, which includes whether each sheet is on, and `schema_migrations`. Before you use it:
+After migrating, `--reset-except-sheets` empties `job_files`, `sheet_writes`, `jobs`, `drive_folders`, `admin_alerts` and `heartbeats`, and restarts their ids from 1. It keeps `sheets`, which includes whether each sheet is ,on and `schema_migrations`. Before you use it:
+y 
 
 - Stop the workers first. A job that's running when you reset can't write back its result once its row has gone.
 - The next sync queues again every row whose status is blank.
