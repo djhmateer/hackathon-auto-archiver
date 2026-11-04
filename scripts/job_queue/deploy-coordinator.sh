@@ -32,11 +32,11 @@ if [ -n "$(git log origin/main..HEAD --oneline)" ]; then
 fi
 
 # secrets/ isn't in git. The coordinator writes the sheet cells using its copy's columns, and the workers archive with
-# theirs, so copy it to all three whichever script is run (DM 4th Nov 26 - a stale coordinator copy dropped new columns)
-CONFIG=secrets/orchestration-aa-dave-testing.yaml
+# theirs, so copy them to all three whichever script is run (DM 4th Nov 26 - a stale coordinator copy dropped new columns)
+CONFIGS="secrets/orchestration-aa-dave-testing.yaml secrets/orchestration-aa-clienta.yaml"
 for CONFIG_PORT in 340 341 342; do
-    echo "== Copying $CONFIG to $HOST port $CONFIG_PORT"
-    scp -q -P "$CONFIG_PORT" "$CONFIG" "$HOST:/home/dave/auto-archiver/secrets/"
+    echo "== Copying $CONFIGS to $HOST port $CONFIG_PORT"
+    scp -q -P "$CONFIG_PORT" $CONFIGS "$HOST:/home/dave/auto-archiver/secrets/"
 done
 
 ssh -p "$PORT" "$HOST" RESET=$RESET bash -s <<'REMOTE'
