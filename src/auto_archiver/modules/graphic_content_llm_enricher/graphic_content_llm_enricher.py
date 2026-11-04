@@ -142,8 +142,9 @@ class GraphicContentLlmEnricher(Enricher):
         logger.info("Summarising images")
         start = time.monotonic()
         try:
-            # no thinking: it was most of the summary's time (DM 4th Nov 26 - 254 output tokens, 72 s)
-            to_enrich.set("images_summary", self.ask(SUMMARY_PROMPT + "\n".join(lines), think=False).strip())
+            # thinking is most of the summary's time, but the model ignores think: false (DM 4th Nov 26 - still ~250-330
+            # output tokens for a one-sentence summary), so it uses the configured level like the ratings
+            to_enrich.set("images_summary", self.ask(SUMMARY_PROMPT + "\n".join(lines)).strip())
             logger.info(f"Summarised images ({round(time.monotonic() - start)} s)")
         except Exception as e:
             logger.warning(f"Could not summarise images: {e}")
@@ -164,7 +165,7 @@ class GraphicContentLlmEnricher(Enricher):
             img.save(buffer, format="JPEG", quality=90)
             return base64.b64encode(buffer.getvalue()).decode(), original, img.size
 
-    def ask(self, prompt: str, image: str = None, think: bool = True) -> str:
+    def ask(self, prompt: str, image: str = None) -> str:
         body = {
             "model": self.model,
             "prompt": prompt,
@@ -174,9 +175,7 @@ class GraphicContentLlmEnricher(Enricher):
             "keep_alive": "30m",
             "options": {"num_ctx": 32768, "num_predict": 6000, "temperature": 0, "num_thread": self.threads},
         }
-        if not think:
-            body["think"] = False
-        elif self.think:
+        if self.think:
             body["think"] = self.think
         request = urllib.request.Request(
             f"{self.ollama_url}/api/generate",
