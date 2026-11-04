@@ -34,6 +34,8 @@
                 "pdq_hash": "perceptual hashes",
                 "wacz": "wacz",
                 "replaywebpage": "replaywebpage",
+                "graphic_rating": "highest graphic rating",
+                "images_summary": "images summary",
             },
             "help": "Custom names for the columns in your Google sheet. If you don't want to use the default column names, change them with this setting",
             "type": "json_loader",

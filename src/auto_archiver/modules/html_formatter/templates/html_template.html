@@ -70,6 +70,26 @@
             filter: grayscale(1);
         }
 
+        /* graphic images: blurred beyond recognition until clicked, clipped so the blur can't spill out */
+        .graphic-hidden {
+            display: inline-block;
+            overflow: hidden;
+            cursor: pointer;
+        }
+
+        /* !important beats the safe view's inline grayscale/hover filter */
+        .graphic-hidden img,
+        .graphic-hidden video {
+            filter: blur(80px) !important;
+        }
+
+        /* descriptions of graphic images, unreadable until clicked */
+        .graphic-text-hidden {
+            filter: blur(5px);
+            cursor: pointer;
+            user-select: none;
+        }
+
         /* Disable grayscale on hover */
         /* img:hover,
         video:hover {

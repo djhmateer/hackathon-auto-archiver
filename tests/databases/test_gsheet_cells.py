@@ -37,6 +37,16 @@ def test_builds_every_cell_without_a_sheet(mocker):
     json.dumps(cells)  # they go in sheet_writes as jsonb
 
 
+def test_graphic_rating_and_images_summary():
+    item = Metadata().set_url("http://example.com/post").success("my-archiver")
+    item.set("graphic_rating", 4).set("images_summary", "Two images, one shows a body.")
+
+    cells = build_result_cells(item)
+
+    assert cells["graphic_rating"] == 4
+    assert cells["images_summary"] == "Two images, one shows a body."
+
+
 def test_cached_notes_and_failed_uploads_go_in_the_status():
     item = Metadata().set_url("http://example.com/post").success("my-archiver")
     item.record_store_failure("a.mp4")

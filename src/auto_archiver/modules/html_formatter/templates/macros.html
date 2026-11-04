@@ -6,9 +6,19 @@ No URL available for {{ m.key }}.
 {% elif 'http://' in url or 'https://' in url or url.startswith('/') %}
 {% if 'image' in m.mimetype %}
 <div>
-    <a href="{{ url }}">
-        <img src="{{ url }}" style="max-height:400px;max-width:400px;"></img>
-    </a>
+    {# rated by graphic_content_llm_enricher: blur 3+ and unrated ("needs review") until clicked #}
+    {% set graphic = m.get('graphic_rating') %}
+    {% if graphic is string or (graphic is number and graphic >= 3) %}
+    <div><b>Graphic content (rating {{ graphic }}): click the image to view</b></div>
+    <div class="graphic-hidden"
+        onclick="if (this.classList.contains('graphic-hidden')) { event.preventDefault(); this.classList.remove('graphic-hidden'); }">
+    {% else %}
+    <div>
+    {% endif %}
+        <a href="{{ url }}">
+            <img src="{{ url }}" style="max-height:400px;max-width:400px;"></img>
+        </a>
+    </div>
 
     <div>
         Reverse Image Search:&nbsp;
@@ -28,9 +38,19 @@ No URL available for {{ m.key }}.
 </div>
 {% elif 'video' in m.mimetype %}
 <div>
-    <video src="{{ url }}" controls style="max-height:400px;max-width:600px;">
-        Your browser does not support the video element.
-    </video>
+    {# rated on its first frame by graphic_content_llm_enricher: blur 3+ and unrated ("needs review") until clicked #}
+    {% set graphic = m.get('graphic_rating') %}
+    {% if graphic is string or (graphic is number and graphic >= 3) %}
+    <div><b>Graphic content (first frame rating {{ graphic }}): click the video to view</b></div>
+    <div class="graphic-hidden"
+        onclick="if (this.classList.contains('graphic-hidden')) { event.preventDefault(); this.classList.remove('graphic-hidden'); }">
+    {% else %}
+    <div>
+    {% endif %}
+        <video src="{{ url }}" controls style="max-height:400px;max-width:600px;">
+            Your browser does not support the video element.
+        </video>
+    </div>
 </div>
 {% elif 'application/pdf' in m.mimetype %}
 <div>
@@ -127,8 +147,9 @@ No preview available for <code>{{ m.key }}</code>.
         <ul>
             <li><b>key:</b> <span class="copy">{{ prop.key }}</span></li>
             <li><b>type:</b> <span class="copy">{{ prop.mimetype }}</span></li>
-            {% for subprop in prop.properties %}
-                
+            {# graphic_* go last, below; a rating of 1-5 is too short for the length check below #}
+            {% for subprop in prop.properties if not subprop.startswith('graphic_') %}
+
 
                 {% if prop.properties[subprop] | is_list %}
                 <p></p>
@@ -146,6 +167,17 @@ No preview available for <code>{{ m.key }}</code>.
                 <li><b>{{ subprop }}:</b> {{ copy_urlize(prop.properties[subprop]) }}</li>
                 {% endif %}
 
+            {% endfor %}
+
+            {% set graphic = prop.properties.get('graphic_rating') %}
+            {% for subprop in ['graphic_description', 'graphic_rating', 'graphic_seconds'] if subprop in prop.properties %}
+            {% if subprop == 'graphic_description' and graphic is number and graphic >= 3 %}
+            {# the description of a graphic image can be distressing too #}
+            <li><b>{{ subprop }}:</b> <span class="graphic-text-hidden" title="click to show"
+                onclick="this.classList.remove('graphic-text-hidden')">{{ copy_urlize(prop.properties[subprop]) }}</span></li>
+            {% else %}
+            <li><b>{{ subprop }}:</b> {{ copy_urlize(prop.properties[subprop]) }}</li>
+            {% endif %}
             {% endfor %}
 
         </ul>

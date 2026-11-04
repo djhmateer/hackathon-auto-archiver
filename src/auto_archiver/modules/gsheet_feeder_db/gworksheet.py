@@ -26,6 +26,8 @@ class GWorksheet:
         "pdq_hash": "perceptual hashes",
         "wacz": "wacz",
         "replaywebpage": "replaywebpage",
+        "graphic_rating": "highest graphic rating",
+        "images_summary": "images summary",
     }
 
     @retry(

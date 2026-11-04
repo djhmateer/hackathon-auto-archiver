@@ -81,6 +81,10 @@ def build_result_cells(item: Metadata, cached: bool = False) -> dict:
     if (thumbnail := item.get_first_image("thumbnail")) and getattr(thumbnail, "urls", None):
         add_if_valid("thumbnail", f'=IMAGE("{thumbnail.urls[0]}")')
 
+    # from graphic_content_llm_enricher
+    add_if_valid("graphic_rating", item.get("graphic_rating"))
+    add_if_valid("images_summary", item.get("images_summary"))
+
     if browsertrix := item.get_media_by_id("browsertrix"):
         add_if_valid("wacz", "\n".join(browsertrix.urls))
         add_if_valid(
