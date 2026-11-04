@@ -42,10 +42,14 @@ RATING: a number from 1 to 5
 REASON: one short sentence describing what you see"""
 
 SUMMARY_PROMPT = """Below are notes on the images (and first frames of videos) in one archived post, each with a
-distress rating from 1 (safe) to 5 (truly disturbing). Write one short paragraph for someone about to review them.
-Briefly describe the safe items. Say how many items are distressing and which type (image or video) they are, but
-never describe what they show: do not mention bodies, injury, blood, death, violence, weapons, children or anything
-else upsetting. Just call them distressing. Reply with the paragraph only.
+distress rating from 1 (safe) to 5 (truly disturbing). Summarise what they show in one short paragraph.
+
+Describe the content directly, eg "A man in a volunteer vest stands by an archway, and a group of people load dogs
+into a van." Don't write about the post, the items, their ratings, whether they are safe, or reviewing them.
+
+If any notes just say "distressing", end with one sentence saying how many images or videos are distressing, eg
+"Two videos are distressing." Never describe what they show: do not mention bodies, injury, blood, death, violence,
+weapons, children or anything else upsetting. Reply with the paragraph only.
 
 """
 
