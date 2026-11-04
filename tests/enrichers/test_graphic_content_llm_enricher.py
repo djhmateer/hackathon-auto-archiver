@@ -224,6 +224,19 @@ def test_threads_sent_on_every_call(enricher, mocker):
     assert body["keep_alive"] == "30m"
 
 
+def test_summary_without_thinking(enricher, mocker):
+    urlopen = mocker.patch("urllib.request.urlopen")
+    urlopen.return_value.__enter__.return_value.read.return_value = b'{"response": "RATING: 1"}'
+    enricher.think = "low"
+
+    enricher.ask("rate", "aW1hZ2U=")
+    enricher.ask("summarise", think=False)
+
+    bodies = [__import__("json").loads(call.args[0].data) for call in urlopen.call_args_list]
+    assert bodies[0]["think"] == "low"
+    assert bodies[1]["think"] is False
+
+
 def test_ollama_timings_logged(enricher, mocker):
     urlopen = mocker.patch("urllib.request.urlopen")
     urlopen.return_value.__enter__.return_value.read.return_value = (

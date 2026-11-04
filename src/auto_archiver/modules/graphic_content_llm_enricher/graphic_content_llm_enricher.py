@@ -45,7 +45,8 @@ SUMMARY_PROMPT = """Below are notes on the images (and first frames of videos) i
 distress rating from 1 (safe) to 5 (truly disturbing). Summarise what they show in one short paragraph.
 
 Describe the content directly, eg "A man in a volunteer vest stands by an archway, and a group of people load dogs
-into a van." Don't write about the post, the items, their ratings, whether they are safe, or reviewing them.
+into a van." Don't write about the post, the items, their ratings or reviewing them. Don't say whether anything is
+safe, graphic or distressing, eg never write "with no graphic content visible", except in the closing sentence below.
 
 If any notes just say "distressing", end with one sentence saying how many images or videos are distressing, eg
 "Two videos are distressing." Never describe what they show: do not mention bodies, injury, blood, death, violence,
@@ -141,7 +142,8 @@ class GraphicContentLlmEnricher(Enricher):
         logger.info("Summarising images")
         start = time.monotonic()
         try:
-            to_enrich.set("images_summary", self.ask(SUMMARY_PROMPT + "\n".join(lines)).strip())
+            # no thinking: it was most of the summary's time (DM 4th Nov 26 - 254 output tokens, 72 s)
+            to_enrich.set("images_summary", self.ask(SUMMARY_PROMPT + "\n".join(lines), think=False).strip())
             logger.info(f"Summarised images ({round(time.monotonic() - start)} s)")
         except Exception as e:
             logger.warning(f"Could not summarise images: {e}")
@@ -162,7 +164,7 @@ class GraphicContentLlmEnricher(Enricher):
             img.save(buffer, format="JPEG", quality=90)
             return base64.b64encode(buffer.getvalue()).decode(), original, img.size
 
-    def ask(self, prompt: str, image: str = None) -> str:
+    def ask(self, prompt: str, image: str = None, think: bool = True) -> str:
         body = {
             "model": self.model,
             "prompt": prompt,
@@ -172,7 +174,9 @@ class GraphicContentLlmEnricher(Enricher):
             "keep_alive": "30m",
             "options": {"num_ctx": 32768, "num_predict": 6000, "temperature": 0, "num_thread": self.threads},
         }
-        if self.think:
+        if not think:
+            body["think"] = False
+        elif self.think:
             body["think"] = self.think
         request = urllib.request.Request(
             f"{self.ollama_url}/api/generate",
