@@ -11,6 +11,60 @@ Run every command from the repo root. The database connection comes from a `.env
 AA_DATABASE_URL=postgresql://bob:password@localhost:5432/auto_archiver
 ```
 
+## Update the code
+
+To deploy everything, do the coordinator first, as it applies any new migration, then the workers. The two deploy scripts run from your own machine over SSH, so you need key access to each VM and passwordless `sudo` on it. The host and ports are set at the top of each script.
+
+`secrets/` isn't in git, so before deploying, each script copies the sheet configs listed in `CONFIGS` from your own `secrets/` to the coordinator and every worker, whichever script you run. The coordinator writes the sheet cells using its copy's columns, and the workers archive with theirs, so a stale copy drops new columns. When you add a sheet, add its config to `CONFIGS` in both scripts. Service accounts, cookies and sessions aren't copied: those still go over with FileZilla. Neither are the configs when you deploy by hand, so copy any you've changed first.
+
+### Coordinator
+
+Push your changes to `main` first, as the coordinator pulls from GitHub. The script refuses to run if anything is uncommitted, including untracked files, or if a commit isn't pushed yet. Then, from the repo root on your own machine:
+
+```bash
+bash scripts/job_queue/deploy-coordinator.sh                         # stop, pull, install, migrate, start
+bash scripts/job_queue/deploy-coordinator.sh --reset-except-sheets   # the same, and empty the queue to start again
+```
+
+It stops at the first step that fails, which leaves the coordinator stopped.
+
+After migrating, `--reset-except-sheets` empties `job_files`, `sheet_writes`, `jobs`, `drive_folders`, `admin_alerts` and `heartbeats`, and restarts their ids from 1. It keeps `sheets`, which includes whether each sheet is on, and `schema_migrations`. Before you use it:
+
+- Stop the workers first. A job that's running when you reset can't write back its result once its row has gone.
+- The next sync queues again every row whose status is blank.
+- A sheet that's paused stays paused, as its `setup_failures` and `paused_until` are kept.
+
+To do it by hand instead, on the coordinator VM:
+
+```bash
+git pull origin main
+poetry install --only main
+poetry run python -m auto_archiver.job_queue.migrate
+sudo systemctl restart aa-coordinator
+j                                          # journalctl -u aa-coordinator -f
+```
+
+### Workers
+
+Deploy the coordinator first if there's a new migration. Then, from the repo root on your own machine:
+
+```bash
+bash scripts/job_queue/deploy-workers.sh
+```
+
+It makes the same commit and push checks, then does each worker in turn, so only one is down at a time. It doesn't wait for running jobs: it kills them, and each is retried within about 9 minutes: its 5-minute lease runs out, cleanup requeues it 2 minutes later, and it can be claimed 2 minutes after that. The workers' SSH ports are set at the top of the script.
+
+To do it by hand instead, on each worker VM, finish the running jobs first. This returns once the signal is sent, so wait for the service to stop:
+
+```bash
+sudo systemctl kill --kill-who=main -s SIGTERM aa-worker-supervisor
+systemctl status aa-worker-supervisor      # wait until it says "inactive (dead)" before going on
+git pull origin main
+poetry sync --only main                    # not install: also removes packages that aren't in main
+sudo systemctl start aa-worker-supervisor
+j                                          # journalctl -u aa-worker-supervisor -f
+```
+
 ## Run locally
 
 ```bash
@@ -82,7 +136,7 @@ A worker VM runs one job at a time, so more capacity means more VMs. It reboots 
 
 A VM should run cron or a worker supervisor, not both.
 
-Add the new worker's SSH port to `PORTS` at the top of `scripts/job_queue/deploy-workers.sh`, so updates reach it.
+Add the new worker's SSH port to `PORTS` at the top of `scripts/job_queue/deploy-workers.sh`, so updates reach it, and to the `for CONFIG_PORT in …` config-copy loop in both deploy scripts, so it gets the sheet configs.
 
 ## Move a spreadsheet from cron to the queue
 
@@ -101,59 +155,6 @@ To move it back, keep the coordinator running and run this until it says `Cron c
 
 ```bash
 poetry run python -m auto_archiver.job_queue.sync rollback <spreadsheet_id>
-```
-
-## Update the code
-
-To deploy everything, do the coordinator first, as it applies any new migration, then the workers. The two deploy scripts run from your own machine over SSH, so you need key access to each VM and passwordless `sudo` on it. The host and ports are set at the top of each script.
-
-### Coordinator
-
-Push your changes to `main` first, as the coordinator pulls from GitHub. The script refuses to run if anything is uncommitted, including untracked files, or if a commit isn't pushed yet. Then, from the repo root on your own machine:
-
-```bash
-bash scripts/job_queue/deploy-coordinator.sh                         # stop, pull, install, migrate, start
-bash scripts/job_queue/deploy-coordinator.sh --reset-except-sheets   # the same, and empty the queue to start again
-```
-
-It stops at the first step that fails, which leaves the coordinator stopped.
-
-After migrating, `--reset-except-sheets` empties `job_files`, `sheet_writes`, `jobs`, `drive_folders`, `admin_alerts` and `heartbeats`, and restarts their ids from 1. It keeps `sheets`, which includes whether each sheet is ,on and `schema_migrations`. Before you use it:
-y 
-
-- Stop the workers first. A job that's running when you reset can't write back its result once its row has gone.
-- The next sync queues again every row whose status is blank.
-- A sheet that's paused stays paused, as its `setup_failures` and `paused_until` are kept.
-
-To do it by hand instead, on the coordinator VM:
-
-```bash
-git pull origin main
-poetry install --only main
-poetry run python -m auto_archiver.job_queue.migrate
-sudo systemctl restart aa-coordinator
-j                                          # journalctl -u aa-coordinator -f
-```
-
-### Workers
-
-Deploy the coordinator first if there's a new migration. Then, from the repo root on your own machine:
-
-```bash
-bash scripts/job_queue/deploy-workers.sh
-```
-
-It makes the same commit and push checks, then does each worker in turn, so only one is down at a time. It doesn't wait for running jobs: it kills them, and each is retried once its lease expires, within 5 minutes. The workers' SSH ports are set at the top of the script.
-
-To do it by hand instead, on each worker VM, finish the running jobs first. This returns once the signal is sent, so wait for the service to stop:
-
-```bash
-sudo systemctl kill --kill-who=main -s SIGTERM aa-worker-supervisor
-systemctl status aa-worker-supervisor      # wait until it says "inactive (dead)" before going on
-git pull origin main
-poetry sync --only main                    # not install: also removes packages that aren't in main
-sudo systemctl start aa-worker-supervisor
-j                                          # journalctl -u aa-worker-supervisor -f
 ```
 
 ## Stop a worker
