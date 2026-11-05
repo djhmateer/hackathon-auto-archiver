@@ -1,187 +1,286 @@
-# Job queue
+# Job queue: operations guide
 
-How to run and deploy the Postgres job queue. For the design, see `queue-spec.md`.
+How to install, run, deploy and operate the Postgres job queue. The design, and the reasoning behind it, are in [queue-spec.md](queue-spec.md).
 
-- **Coordinator**: one, on the Postgres VM. Syncs the sheets, writes results back and requeues jobs whose worker died.
-- **Worker supervisor**: one per worker VM. Claims jobs and runs the archiver for each one.
+## Contents
 
-Run every command from the repo root. The database connection comes from a `.env` file in the repo root, which git ignores:
+- [Overview](#overview)
+- [Configuration](#configuration)
+- [Running locally](#running-locally)
+- [Installing a coordinator VM](#installing-a-coordinator-vm)
+- [Installing a worker VM](#installing-a-worker-vm)
+- [Deploying updates](#deploying-updates)
+- [Moving a spreadsheet from cron to the queue](#moving-a-spreadsheet-from-cron-to-the-queue)
+- [Stopping a worker](#stopping-a-worker)
+- [Monitoring](#monitoring)
+- [Troubleshooting](#troubleshooting)
+- [Archive stats](#archive-stats)
+- [Schema migrations](#schema-migrations)
+- [Reference: timings and limits](#reference-timings-and-limits)
+
+## Overview
+
+| Component | Where it runs | What it does |
+|---|---|---|
+| Postgres | Coordinator VM | Holds the queue: `sheets`, `jobs`, `sheet_writes`, `job_files`, `admin_alerts`, `heartbeats`, `drive_folders` |
+| Coordinator (`aa-coordinator`) | Coordinator VM, one only | Runs three steps in a loop on one thread. **Sync** reads the sheets and queues rows. The **sheet writer** writes statuses and results back to the sheets. **Cleanup** requeues jobs whose worker has died. |
+| Worker supervisor (`aa-worker-supervisor`) | Each worker VM | Claims one job at a time and runs the archiver for it as a child process. It renews the job's lease and enforces the time limit. |
+
+A row moves through the queue like this:
+
+1. Sync finds a row with a URL and a blank status, adds a job and sets the row to `Queued`.
+2. A worker claims the job, and the row shows `Archive in progress (<worker_name>)`.
+3. The archiver saves its result to Postgres. The sheet writer copies it to the row.
+
+Only the sheet writer writes to the sheets. Before each write it re-reads the row. If someone has changed the URL or status in the meantime, it records a conflict and waits for an operator instead of overwriting the change.
+
+Run every command from the repo root.
+
+## Configuration
+
+The database connection string is read from a `.env` file in the repo root, which git ignores:
 
 ```
-AA_DATABASE_URL=postgresql://bob:password@localhost:5432/auto_archiver
+AA_DATABASE_URL=postgresql://<user>:<password>@<host>:5432/auto_archiver
 ```
 
-## Update the code
+The install scripts create this file. Sheet configs (`secrets/orchestration-*.yaml`), service accounts, cookies and sessions are not in git and must be copied to each VM.
 
-To deploy everything, do the coordinator first, as it applies any new migration, then the workers. The two deploy scripts run from your own machine over SSH, so you need key access to each VM and passwordless `sudo` on it. The host and ports are set at the top of each script.
+## Running locally
 
-`secrets/` isn't in git, so before deploying, each script copies the sheet configs listed in `CONFIGS` from your own `secrets/` to the coordinator and every worker, whichever script you run. The coordinator writes the sheet cells using its copy's columns, and the workers archive with theirs, so a stale copy drops new columns. When you add a sheet, add its config to `CONFIGS` in both scripts. Service accounts, cookies and sessions aren't copied: those still go over with FileZilla. Neither are the configs when you deploy by hand, so copy any you've changed first.
+```bash
+poetry run python -m auto_archiver.job_queue.migrate              # apply any pending migrations
+poetry run python -m auto_archiver.job_queue.coordinator          # terminal 1
+poetry run python -m auto_archiver.job_queue.worker_supervisor    # terminal 2
+```
+
+The supervisor accepts `--worker <name>` (the default is the hostname) and `--reboot-at HH:MM` (UK time; if it's left out, the worker never reboots itself).
+
+The coordinator's steps can also be run on their own, for debugging:
+
+```bash
+poetry run python -m auto_archiver.job_queue.sync run --once
+poetry run python -m auto_archiver.job_queue.writer run --once
+```
+
+## Installing a coordinator VM
+
+Target: Ubuntu 26.04. The script also installs Postgres 18.
+
+```bash
+git clone https://github.com/djhmateer/hackathon-auto-archiver.git ~/auto-archiver
+cd ~/auto-archiver
+bash scripts/job_queue/install-coordinator.sh
+```
+
+Run it as your normal user, not root. It is safe to run again. It installs Postgres, creates the database, writes `.env`, applies the migrations and installs the `aa-coordinator` service. It doesn't start the service.
+
+Then:
+
+1. Copy each sheet's config and service account into `secrets/`.
+2. If a firewall sits between the coordinator and the workers, open port 5432 to the workers.
+3. Register each sheet. Its tabs start **off**, so sync doesn't read them until you enable them (see [Moving a spreadsheet from cron to the queue](#moving-a-spreadsheet-from-cron-to-the-queue)):
+
+   ```bash
+   poetry run python -m auto_archiver.job_queue.sync register secrets/<config>.yaml
+   ```
+
+4. Start the service and watch its log:
+
+   ```bash
+   sudo systemctl start aa-coordinator
+   j                                   # alias for journalctl -u aa-coordinator -f, from your next login
+   ```
+
+Postgres accepts remote connections only from subnets the VM is directly attached to (`samenet` in `pg_hba.conf`). A worker on another subnet needs its own `pg_hba.conf` line.
+
+## Installing a worker VM
+
+Target: Ubuntu 26.04.
+
+```bash
+git clone https://github.com/djhmateer/hackathon-auto-archiver.git ~/auto-archiver
+cd ~/auto-archiver
+bash scripts/job_queue/install-worker.sh --coordinator-database <coordinator_ip>
+```
+
+Run it as your normal user, not root. It is safe to run again. It installs:
+
+- Firefox, geckodriver and Chrome
+- Docker, with the browsertrix-crawler and YouTube token containers
+- Deno, ffmpeg, exiftool and tesseract
+- Python 3.12 and the project
+
+It then checks that it can reach Postgres. If that check fails and the worker is on a different subnet from the coordinator, add a `pg_hba.conf` line for it on the coordinator.
+
+The script enables the `aa-worker-supervisor` service but doesn't start it. Then, in this order:
+
+1. **Copy the secrets.** Copy into `secrets/` every config the queue runs, with its service accounts, cookies, sessions and browser profiles, at the same paths as on the coordinator. Do this before rebooting. The service starts by itself on boot, and without the configs every job fails in setup.
+2. **Reboot** with `sudo reboot`. This applies the `docker` group membership and frees the 512 MB of memory that was reserved for crash dumps (the script removes `kdump-tools`).
+3. **Check the log** with `j`, an alias for `journalctl -u aa-worker-supervisor -f`. Look for `Started worker <worker_name>, … daily reboot at 05:20`, followed by `Waiting for jobs: …`. The coordinator logs `Worker <worker_name> is up`.
+4. **Add the worker to the deploy scripts.** Add its SSH port to `PORTS` in `scripts/job_queue/deploy-workers.sh`, so that deploys reach it. Also add it to the `for CONFIG_PORT in …` loop in both deploy scripts, so that it receives the sheet configs.
+
+Notes:
+
+- A worker runs one job at a time. To add capacity, add VMs.
+- Workers reboot daily at 05:20 UK time. If a job is still running at that point, the reboot waits for it, for up to an hour. To change the time, edit `/etc/systemd/system/aa-worker-supervisor.service` and run `sudo systemctl daemon-reload`.
+- A VM should run either the old cron archiver or a worker supervisor, never both.
+
+## Deploying updates
+
+Deploy the coordinator first, because it applies any new migrations, and then the workers. Both scripts run from your own machine over SSH, and need key-based access and passwordless `sudo` on each VM. The host, SSH ports and remote repo path are set at the top of each script.
+
+Before deploying, both scripts:
+
+- refuse to run if there are uncommitted changes (including untracked files) or commits that haven't been pushed to `origin/main`, because the VMs pull from GitHub;
+- copy the sheet configs listed in `CONFIGS` from your local `secrets/` to the coordinator and every worker. The coordinator writes cells using its copy's column names, and the workers archive with theirs, so a stale copy silently drops new columns. When you add a sheet, add its config to `CONFIGS` in **both** scripts.
+
+Service accounts, cookies and sessions are not copied automatically. If you deploy by hand, the configs aren't copied either, so copy any that have changed.
 
 ### Coordinator
 
-Push your changes to `main` first, as the coordinator pulls from GitHub. The script refuses to run if anything is uncommitted, including untracked files, or if a commit isn't pushed yet. Then, from the repo root on your own machine:
-
 ```bash
 bash scripts/job_queue/deploy-coordinator.sh                         # stop, pull, install, migrate, start
-bash scripts/job_queue/deploy-coordinator.sh --reset-except-sheets   # the same, and empty the queue to start again
+bash scripts/job_queue/deploy-coordinator.sh --reset-except-sheets   # the same, then empty the queue
 ```
 
-It stops at the first step that fails, which leaves the coordinator stopped.
+The script stops at the first step that fails, which leaves the coordinator stopped.
 
-After migrating, `--reset-except-sheets` empties `job_files`, `sheet_writes`, `jobs`, `drive_folders`, `admin_alerts` and `heartbeats`, and restarts their ids from 1. It keeps `sheets`, which includes whether each sheet is on, and `schema_migrations`. Before you use it:
+`--reset-except-sheets` runs after the migrations. It empties `job_files`, `sheet_writes`, `jobs`, `drive_folders`, `admin_alerts` and `heartbeats` and restarts their ids from 1. It keeps `sheets` (including whether each tab is enabled) and `schema_migrations`. Before you use it:
 
-- Stop the workers first. A job that's running when you reset can't write back its result once its row has gone.
-- The next sync queues again every row whose status is blank.
-- A sheet that's paused stays paused, as its `setup_failures` and `paused_until` are kept.
+- Stop the workers first. A job that is running during the reset can't save its result, because its row no longer exists.
+- After the reset, the next sync queues every row with a blank status again.
+- Paused sheets stay paused, because `setup_failures` and `paused_until` are kept.
 
-To do it by hand instead, on the coordinator VM:
+To deploy by hand, on the coordinator VM:
 
 ```bash
 git pull origin main
 poetry install --only main
 poetry run python -m auto_archiver.job_queue.migrate
 sudo systemctl restart aa-coordinator
-j                                          # journalctl -u aa-coordinator -f
 ```
 
 ### Workers
-
-Deploy the coordinator first if there's a new migration. Then, from the repo root on your own machine:
 
 ```bash
 bash scripts/job_queue/deploy-workers.sh
 ```
 
-It makes the same commit and push checks, then does each worker in turn, so only one is down at a time. It doesn't wait for running jobs: it kills them, and each is retried within about 9 minutes: its 5-minute lease runs out, cleanup requeues it 2 minutes later, and it can be claimed 2 minutes after that. The workers' SSH ports are set at the top of the script.
+The script runs the same checks, then updates one worker at a time, so only one is down at once. **It kills running jobs rather than waiting for them.** Each killed job is retried within about 9 minutes: the lease expires after 5, cleanup requeues it 2 minutes after that, and the job becomes claimable 2 minutes later.
 
-To do it by hand instead, on each worker VM, finish the running jobs first. This returns once the signal is sent, so wait for the service to stop:
+To deploy by hand without killing the running job, on each worker VM:
 
 ```bash
-sudo systemctl kill --kill-who=main -s SIGTERM aa-worker-supervisor
-systemctl status aa-worker-supervisor      # wait until it says "inactive (dead)" before going on
+sudo systemctl kill --kill-who=main -s SIGTERM aa-worker-supervisor   # finish the running job, then stop
+systemctl status aa-worker-supervisor      # wait for "inactive (dead)"
 git pull origin main
-poetry sync --only main                    # not install: also removes packages that aren't in main
+poetry sync --only main                    # sync, not install, so removed packages are uninstalled
 sudo systemctl start aa-worker-supervisor
-j                                          # journalctl -u aa-worker-supervisor -f
 ```
 
-## Run locally
+## Moving a spreadsheet from cron to the queue
 
-```bash
-# checks and applies migrations (connection string read from .env)
-poetry run python -m auto_archiver.job_queue.migrate
-# run the coordinator
-poetry run python -m auto_archiver.job_queue.coordinator
-# run the worker
-poetry run python -m auto_archiver.job_queue.worker_supervisor
-```
-
-Run the last two in separate terminals.
-
-## Deploy a new coordinator VM
-
-Ubuntu 26.04. This also installs Postgres 18 on the VM.
-
-```bash
-git clone <repo_url> /home/dave/auto-archiver
-cd /home/dave/auto-archiver
-git pull origin main
-bash scripts/job_queue/install-coordinator.sh
-```
-
-Run the script as your normal user, not root. It's safe to run again. It doesn't start the coordinator, so then:
-
-1. Copy each sheet's config and service account into `secrets/` with FileZilla.
-2. Open port 5432 to the workers, if anything between them blocks it.
-3. Register the sheets. They start off, so sync doesn't read them until you move them to the queue:
-
-   ```bash
-   poetry run python -m auto_archiver.job_queue.sync register secrets/<config>.yaml
-   ```
-
-4. Start it, and watch the logs:
-
-   ```bash
-   sudo systemctl start aa-coordinator
-   j                                       # journalctl -u aa-coordinator -f, from your next login
-   ```
-
-Postgres only accepts connections from subnets the VM is directly attached to. A worker elsewhere needs its own `pg_hba` line.
-
-## Deploy a new worker VM
-
-Ubuntu 26.04. Before you start:
-
-```bash
-git clone https://github.com/djhmateer/hackathon-auto-archiver.git /home/dave/auto-archiver
-cd /home/dave/auto-archiver
-bash scripts/job_queue/install-worker.sh --coordinator-database 172.16.45.40
-```
-
-Run the script as your normal user, not root. It's safe to run again. It installs Firefox, geckodriver, Chrome, Docker, the browsertrix-crawler and YouTube token containers, Deno, ffmpeg, exiftool, tesseract, Python 3.12 and the project, then checks it can use Postgres. If that check fails and the VM is on another subnet from the coordinator, the coordinator needs a `pg_hba` line for it.
-
-The script enables the service but doesn't start it, so then, in this order:
-
-1. Copy into `secrets/` with FileZilla every config the queue runs, with its service accounts, cookies, sessions and profiles, at the same paths as on the coordinator. Do this before rebooting: the service starts by itself on the reboot, and without the configs every job fails in setup, and the worker pauses after 3 quick failures.
-2. Reboot, so the `docker` group applies, and the 512 MB that crash dumps (`kdump-tools`, which the script removes) would reserve is freed: `sudo reboot`. The worker starts by itself.
-3. Watch the logs:
-
-   ```bash
-   j                                       # journalctl -u aa-worker-supervisor -f
-   ```
-
-   Look for `Started worker <worker_name>, … daily reboot at 05:20`, then `Waiting for jobs: …`. The coordinator logs `Worker <worker_name> is up`.
-
-A worker VM runs one job at a time, so more capacity means more VMs. It reboots daily at 05:20 UK time. To change that, edit `/etc/systemd/system/aa-worker-supervisor.service`, then run `sudo systemctl daemon-reload`.
-
-A VM should run cron or a worker supervisor, not both.
-
-Add the new worker's SSH port to `PORTS` at the top of `scripts/job_queue/deploy-workers.sh`, so updates reach it, and to the `for CONFIG_PORT in …` config-copy loop in both deploy scripts, so it gets the sheet configs.
-
-## Move a spreadsheet from cron to the queue
-
-1. Register it, if it isn't already. See "Deploy a new coordinator VM".
-2. Turn off the spreadsheet's cron line, and wait for the cron run to finish.
-3. Check no row still says `Archive in progress`. Blank it for a rerun, or set it to a final status.
-4. Turn it on. All its tabs move, and any tabs added later start on:
+1. Register the spreadsheet if you haven't already (see [Installing a coordinator VM](#installing-a-coordinator-vm)).
+2. Turn off the spreadsheet's cron line, and wait for the current cron run to finish.
+3. Check that no row still says `Archive in progress`. Blank such a row to rerun it, or set it to a final status.
+4. Enable it. All its tabs move to the queue, and any tabs added later start enabled:
 
    ```bash
    poetry run python -m auto_archiver.job_queue.sync enable <spreadsheet_id>
    ```
 
-The id is in `sheets.spreadsheet_id`.
+   The id is in `sheets.spreadsheet_id`.
 
-To move it back, keep the coordinator running and run this until it says `Cron can go back on`. Only then turn the cron line back on:
+To move a spreadsheet back to cron, leave the coordinator running and repeat the command below until it reports `Cron can go back on`. Only then re-enable the cron line:
 
 ```bash
 poetry run python -m auto_archiver.job_queue.sync rollback <spreadsheet_id>
 ```
 
-## Stop a worker
+Each run turns the spreadsheet's tabs off and cancels any queued jobs, which clears their status. It then reports how many jobs are still running and how many sheet writes are still to be sent. Cron is only safe once both are zero.
 
-| Command | Running jobs |
+## Stopping a worker
+
+| Command | Effect on the running job |
 |---|---|
-| `sudo systemctl kill --kill-who=main -s SIGTERM aa-worker-supervisor` | Finish, however long they take |
-| `sudo systemctl stop aa-worker-supervisor` | Killed after 15 minutes, then retried once the lease expires |
-| Ctrl-C, when running in a terminal | Finish, however long they take |
+| `sudo systemctl kill --kill-who=main -s SIGTERM aa-worker-supervisor` | Lets it finish, however long it takes, then stops |
+| `sudo systemctl stop aa-worker-supervisor` | Lets it run for up to 15 minutes, then kills it. It is retried once its lease expires. |
+| Ctrl-C (when running in a terminal) | Lets it finish, however long it takes, then stops |
+
+## Monitoring
+
+```bash
+export PGPASSWORD=<password>
+Q="psql -h localhost -U <user> -d auto_archiver -c"
+
+$Q "SELECT status, count(*) FROM jobs GROUP BY status"
+$Q "SELECT id, row_number, status, attempts, worker, error FROM jobs ORDER BY id DESC LIMIT 20"
+$Q "SELECT name, beat_at FROM heartbeats"
+$Q "SELECT kind, message, created_at FROM admin_alerts ORDER BY id DESC LIMIT 20"
+```
+
+Alerts are not emailed yet, so check `admin_alerts` regularly.
+
+When the sheet writer finds that a row has changed, it leaves that write unsent as a conflict. It also holds back that job's later writes until an operator deals with the conflict:
+
+```bash
+poetry run python -m auto_archiver.job_queue.writer conflicts       # list them
+poetry run python -m auto_archiver.job_queue.writer retry <id>      # check the row again and write
+poetry run python -m auto_archiver.job_queue.writer discard <id>    # give up on that write
+```
+
+### Logs
+
+| What | Where |
+|---|---|
+| Coordinator | `journalctl -u aa-coordinator -f` (alias `j` on the coordinator VM) |
+| Worker supervisor | `journalctl -u aa-worker-supervisor -f` (alias `j` on each worker VM) |
+| Archiver | `logs/` on the worker, e.g. `1debug.log`, and `hangs.log` for stack dumps of stalled rows |
+| Errors during a job's setup, and crashes | `logs/last-job-console.log` on the worker (last job only) |
+
+The coordinator's log is the best single view of the system. It records each job as it is queued, claimed and finished, each worker coming up or going quiet, and every sheet write.
+
+## Troubleshooting
+
+**A queued job isn't being claimed.** Only one job per site runs at a time. The coordinator logs each job held back for this reason once: `Not claimed yet: job <id> … waits for its site <domain>, as job <id> on worker <worker_name> is running it`. A job can also be waiting for a retry delay, or belong to a sheet that is paused or not enabled.
+
+**A sheet has been paused.** After 3 setup failures in a row (the archiver exits before it starts work), the sheet is paused for 15 minutes and an alert is raised. The cause is usually a missing or broken config, or missing secrets on a worker. Check `logs/last-job-console.log` on the worker. The pause clears once a job from that sheet gets past setup.
+
+**A worker has stopped claiming jobs.** If a worker has 3 quick failures in a row across different sheets, it stops claiming for 15 minutes and raises an alert, so that a broken VM can't empty the queue.
+
+**A Vimeo job produced no video.** If a `vimeo.com` job finishes as `wacz: success`, the coordinator logs a warning: `Job <id> got no video from vimeo.com, only a WACZ of the page`. The sheet shows success, but Cloudflare is probably challenging the workers' IP address. Open a Vimeo video in a browser on the same network, pass the "Verify you are human" check, then clear the row's status so it runs again.
+
+**A row says `Queued` or `Archive in progress` but has no job.** Sync raises a `sheet_disagrees` alert, at most once a day per row. Usually the row was edited by hand, or the queue was reset. Clear the status to rerun the row.
 
 ## Archive stats
 
-Each job a worker finishes saves its stats, for a dashboard. Jobs finished before migration 003, or by a worker on older code, have none. Times are UTC.
+Each job a worker finishes records statistics for reporting. Times are in UTC. Jobs finished before migration 003, or by a worker on older code, have no stats.
 
-- `jobs`, besides the sheet, row, folder, worker and timings it already had: `title`, `archive_url`, `extractor` (eg `vimeo`), `posted_at` (when the original was posted), `cached`, `store_failures` (files that didn't upload) and the worker's `git_commit`. The archive took `finished_at - work_started_at`, and waited `started_at - added_at` in the queue.
-- `job_files`: one row per stored file for each attempt, so a retry's files count too. Each has its `role` (eg `browsertrix`, `metadata_json`, blank for the main media), `key`, `url`, `mimetype` (`application/wacz` for a WACZ), `bytes`, `hash` and `duration_seconds`. Every file in an archive is hashed with the hash enricher's algorithm, eg `SHA3-512:…`, including files it didn't cover, such as screenshots and the WACZ. `posted_at` and `duration_seconds` are empty when the extractor didn't find them.
-- `sheets.client`: who the sheet is for. Set it by hand.
+- **`jobs`**: as well as the sheet, row, folder, worker and timings, each job records:
+  - `title` and `archive_url`
+  - `extractor`, the one that succeeded (e.g. `vimeo`)
+  - `posted_at`, when the original was posted
+  - `cached`
+  - `store_failures`, the number of files that failed to upload
+  - `git_commit`, the worker's code version
+
+  The archive took `finished_at - work_started_at`, and the job waited `started_at - added_at` in the queue.
+- **`job_files`**: one row per stored file per attempt, so a retry's files are counted too. Each row has:
+  - `role` (e.g. `browsertrix` or `metadata_json`; blank for the main media)
+  - `key`, `url`, `mimetype` (`application/wacz` for a WACZ) and `bytes`
+  - `hash`. Every file is hashed with the hash enricher's algorithm (e.g. `SHA3-512:…`), including files the enricher didn't cover, such as screenshots and WACZs.
+  - `duration_seconds`
+
+  `posted_at` and `duration_seconds` are empty when the extractor didn't find them.
+- **`sheets.client`**: who the sheet is for. Set it by hand.
 
 If the stats can't be worked out, the result is saved without them, and the archiver logs `Couldn't work out the archive's stats`.
 
 ```bash
-export PGPASSWORD=password
-Q="psql -h localhost -U bob -d auto_archiver -c"
-
 $Q "UPDATE sheets SET client = '<client_name>' WHERE spreadsheet_id = '<spreadsheet_id>'"
 
-# the last 20 archives: files, size and how long each took
+# the last 20 archives: number of files, total size and time taken
 $Q "SELECT j.id, j.row_number, j.folder, j.extractor, count(f.id) AS files,
            pg_size_pretty(sum(f.bytes)) AS size, j.finished_at - j.work_started_at AS took
     FROM jobs j LEFT JOIN job_files f ON f.job_id = j.id
@@ -195,36 +294,31 @@ $Q "SELECT s.client, count(DISTINCT j.id) AS archives, pg_size_pretty(sum(f.byte
     FROM job_files f JOIN jobs j ON j.id = f.job_id JOIN sheets s ON s.id = j.sheet_id GROUP BY s.client"
 ```
 
-## Add a migration
+## Schema migrations
 
-Add the next numbered file to `src/auto_archiver/job_queue/migrations/`, such as `007_add_something.sql`, and run `migrate`. Never edit a file that's already been applied.
-
-The coordinator won't start if a migration isn't applied, an applied file has been edited, or the database has a migration its code doesn't.
-
-## Check on it
+Migrations are plain SQL files in `src/auto_archiver/job_queue/migrations/`, applied in filename order, each in its own transaction. To change the schema, add the next numbered file (e.g. `007_add_something.sql`) and run:
 
 ```bash
-export PGPASSWORD=password
-Q="psql -h localhost -U bob -d auto_archiver -c"
-
-$Q "SELECT status, count(*) FROM jobs GROUP BY status"
-$Q "SELECT id, row_number, status, attempts, worker, error FROM jobs ORDER BY id DESC LIMIT 20"
-$Q "SELECT name, beat_at FROM heartbeats"
-$Q "SELECT kind, message, created_at FROM admin_alerts ORDER BY id DESC LIMIT 20"
+poetry run python -m auto_archiver.job_queue.migrate
 ```
 
-Alerts aren't emailed yet, so check them by hand. A sheet write that hit a conflict waits for you:
+Never edit a file that has already been applied: its checksum is recorded. The coordinator refuses to start in any of these cases:
 
-```bash
-poetry run python -m auto_archiver.job_queue.writer conflicts
-poetry run python -m auto_archiver.job_queue.writer retry <id>
-poetry run python -m auto_archiver.job_queue.writer discard <id>
-```
+- a migration is pending;
+- an applied file has been edited;
+- the database has a migration that the code doesn't.
 
-Logs:
+## Reference: timings and limits
 
-- **Coordinator and worker supervisor:** `journalctl -u aa-coordinator -f` and `journalctl -u aa-worker-supervisor -f`. The install scripts add a `j` alias for this to `~/.bash_aliases` on each VM.
-- **A job that isn't being claimed:** only one job per site (eg vimeo.com) runs at a time. The coordinator logs `Not claimed yet: job <id> … waits for its site <domain>, as job <id> on worker <worker_name> is running it` once for each job held back like this.
-- **A Vimeo URL with no video:** if a vimeo.com job finishes as `wacz: success`, the coordinator logs a WARNING, `Job <id> got no video from vimeo.com, only a WACZ of the page`. The sheet looks like a success, but Cloudflare is probably challenging the workers' IP. To fix it, open a Vimeo video in a browser on the same network, pass the "Verify you are human" check, then clear the row's status so it runs again.
-- **Archiver:** `logs/`, such as `1debug.log` and `hangs.log`
-- **Errors during a job's setup:** `logs/last-job-console.log`
+| Setting | Value | Defined in |
+|---|---|---|
+| Coordinator cycle (writer, cleanup) | 5 s | `coordinator.py` `CYCLE_SECONDS` |
+| Sheet sync interval | 15 s (testing value; planned to go back to 60 s before busy sheets move) | `coordinator.py` `SYNC_SECONDS` |
+| Worker tick and heartbeat | 2 s | `worker_supervisor.py` `TICK_SECONDS` |
+| Worker reported as quiet after | 30 s without a heartbeat | `coordinator.py` `WORKER_QUIET_SECONDS` |
+| Lease length, and how often it's renewed | 5 min, renewed every 60 s | `db.py` `claim_job`, `worker_supervisor.py` `RENEW_SECONDS` |
+| Requeue after a lease expires | 2 min grace, then claimable 2 min later | `db.py` `requeue_expired` |
+| Attempts before a job fails | 3 | `db.py` `MAX_ATTEMPTS` |
+| Setup failures before a sheet is paused | 3, then paused for 15 min | `db.py` `MAX_SETUP_FAILURES` |
+| Job time limit | 3 h in the archiver, with a 3 h 5 min backstop in the supervisor | `worker_supervisor.py` `TIME_LIMIT_SECONDS` |
+| Daily reboot | 05:20 UK time, forced after 1 h if a job is still running | service file `--reboot-at`, `FORCE_REBOOT_AFTER_SECONDS` |
