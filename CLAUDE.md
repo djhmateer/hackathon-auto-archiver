@@ -43,6 +43,15 @@ New modules should follow the existing pattern:
 3. Implement the appropriate base class (Feeder, Extractor, Enricher, etc.)
 4. Add configuration handling
 
+## Connecting to Servers
+
+- The only hosts you may SSH to are the `pve3` VMs, all on `192.168.1.212` by port:
+  - `ssh 192.168.1.212 -p 301` - LLM
+  - `ssh 192.168.1.212 -p 340` - coordinator (Postgres job queue)
+  - `ssh 192.168.1.212 -p 341` - worker41
+  - `ssh 192.168.1.212 -p 342` - worker42
+- Never connect to any other production server or host (e.g. servers 11-15); use `aa_logs` and the mirrored logs below.
+
 ## Investigating Production Errors
 
 When asked to look at the prod logs, query the PostgreSQL database `aa_logs` first. The `aa-logs` project

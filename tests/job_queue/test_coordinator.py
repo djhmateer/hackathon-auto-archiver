@@ -28,7 +28,7 @@ def test_startup_logs_the_tabs_and_queue_but_not_the_password(conn, caplog):
     coordinator.log_startup(conn)
     assert f"database {conn.info.dbname} on" in caplog.text
     assert f"Tab tab1 (sheet {sheet}, live): spreadsheet spreadsheet1, config config.yaml" in caplog.text
-    assert "Queue: 1 queued, 0 running, 1 sheet writes to do, 0 conflicts, 0 unsent alerts" in caplog.text
+    assert "Queue: 1 queued, 0 running, 1 sheet writes to do, 0 unsent alerts" in caplog.text
     assert conn.info.password not in caplog.text
 
 

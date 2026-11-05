@@ -185,8 +185,6 @@ def get_queue_summary(conn: psycopg.Connection) -> dict:
             (SELECT count(*) FROM jobs WHERE status = 'queued') AS queued,
             (SELECT count(*) FROM jobs WHERE status = 'running') AS running,
             (SELECT count(*) FROM sheet_writes WHERE written_at IS NULL AND discarded_at IS NULL) AS unwritten,
-            (SELECT count(*) FROM sheet_writes WHERE conflict IS NOT NULL
-                AND written_at IS NULL AND discarded_at IS NULL) AS conflicts,
             (SELECT count(*) FROM admin_alerts WHERE sent_at IS NULL) AS unsent_alerts
         """
     ).fetchone()
@@ -325,60 +323,46 @@ def get_row_states(conn: psycopg.Connection, sheet_id: int, snapshot_at) -> list
 
 
 def get_next_sheet_writes(conn: psycopg.Connection) -> list[dict]:
-    """The oldest unwritten entry of each job. A job whose oldest has a conflict waits, so updates stay in order"""
+    """The latest unwritten entry of each job, as it has the row's current status. Earlier ones aren't needed"""
     return conn.execute(
         """
         SELECT * FROM (
-            SELECT DISTINCT ON (w.job_id) w.id, w.job_id, w.cells, w.expected_status, w.skip_url_check, w.conflict,
+            SELECT DISTINCT ON (w.job_id) w.id, w.job_id, w.cells, w.skip_url_check,
                 j.row_number, j.url, s.id AS sheet_id, s.spreadsheet_id, s.worksheet_gid, s.config
             FROM sheet_writes w JOIN jobs j ON j.id = w.job_id JOIN sheets s ON s.id = j.sheet_id
             WHERE w.written_at IS NULL AND w.discarded_at IS NULL
-            ORDER BY w.job_id, w.id
-        ) next_entries
-        WHERE conflict IS NULL
+            ORDER BY w.job_id, w.id DESC
+        ) latest_entries
         ORDER BY id
         """
     ).fetchall()
 
 
 def mark_written(conn: psycopg.Connection, write_ids: list[int]) -> None:
-    """Only once the sheet has been updated, as sync rule 1 relies on that"""
-    conn.execute("UPDATE sheet_writes SET written_at = now() WHERE id = ANY(%s)", (write_ids,))
+    """
+    Marks each entry written, with its job's earlier unwritten entries, which it replaced on the sheet.
+    Only once the sheet has been updated, as sync rule 1 relies on that
+    """
+    conn.execute(
+        """
+        UPDATE sheet_writes w SET written_at = now()
+        FROM sheet_writes latest
+        WHERE latest.id = ANY(%s) AND w.job_id = latest.job_id AND w.id <= latest.id
+            AND w.written_at IS NULL AND w.discarded_at IS NULL
+        """,
+        (write_ids,),
+    )
 
 
-def set_conflict(conn: psycopg.Connection, write_id: int, conflict: str) -> None:
+def discard_job_writes(conn: psycopg.Connection, job_id: int, message: str) -> None:
+    """Drops a job's unwritten entries, when they can't go to the sheet, and raises an alert"""
     with conn.transaction():
-        conn.execute("UPDATE sheet_writes SET conflict = %s WHERE id = %s", (conflict, write_id))
-        add_alert(conn, "writer_conflict", f"Sheet write {write_id}: {conflict}")
-
-
-def get_conflicts(conn: psycopg.Connection) -> list[dict]:
-    return conn.execute(
-        """
-        SELECT w.id, w.job_id, j.sheet_id, j.row_number, w.conflict, w.created_at
-        FROM sheet_writes w JOIN jobs j ON j.id = w.job_id
-        WHERE w.conflict IS NOT NULL AND w.written_at IS NULL AND w.discarded_at IS NULL
-        ORDER BY w.id
-        """
-    ).fetchall()
-
-
-def retry_conflict(conn: psycopg.Connection, write_id: int) -> bool:
-    result = conn.execute(
-        "UPDATE sheet_writes SET conflict = NULL WHERE id = %s AND conflict IS NOT NULL AND written_at IS NULL "
-        "AND discarded_at IS NULL",
-        (write_id,),
-    )
-    return result.rowcount == 1
-
-
-def discard_conflict(conn: psycopg.Connection, write_id: int) -> bool:
-    result = conn.execute(
-        "UPDATE sheet_writes SET discarded_at = now() WHERE id = %s AND conflict IS NOT NULL AND written_at IS NULL "
-        "AND discarded_at IS NULL",
-        (write_id,),
-    )
-    return result.rowcount == 1
+        conn.execute(
+            "UPDATE sheet_writes SET discarded_at = now() WHERE job_id = %s AND written_at IS NULL "
+            "AND discarded_at IS NULL",
+            (job_id,),
+        )
+        add_alert(conn, "writer_discarded", message)
 
 
 def count_active_jobs(conn: psycopg.Connection) -> dict:

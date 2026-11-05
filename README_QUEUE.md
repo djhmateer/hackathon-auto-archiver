@@ -32,7 +32,7 @@ A row moves through the queue like this:
 2. A worker claims the job, and the row shows `Archive in progress (<worker_name>)`.
 3. The archiver saves its result to Postgres. The sheet writer copies it to the row.
 
-Only the sheet writer writes to the sheets. Before each write it re-reads the row. If someone has changed the URL or status in the meantime, it records a conflict and waits for an operator instead of overwriting the change.
+Only the sheet writer writes to the sheets. It sends only each job's latest status, and the archiver owns the status cell, so it overwrites whatever is there. Before each write it re-reads the row's URL. If the URL has changed, the rows have moved, so it drops that job's writes and raises a `writer_discarded` alert instead of writing to the wrong row. The result stays in Postgres.
 
 Run every command from the repo root.
 
@@ -222,13 +222,7 @@ $Q "SELECT kind, message, created_at FROM admin_alerts ORDER BY id DESC LIMIT 20
 
 Alerts are not emailed yet, so check `admin_alerts` regularly.
 
-When the sheet writer finds that a row has changed, it leaves that write unsent as a conflict. It also holds back that job's later writes until an operator deals with the conflict:
-
-```bash
-poetry run python -m auto_archiver.job_queue.writer conflicts       # list them
-poetry run python -m auto_archiver.job_queue.writer retry <id>      # check the row again and write
-poetry run python -m auto_archiver.job_queue.writer discard <id>    # give up on that write
-```
+A `writer_discarded` alert means a job's result never reached the sheet, because its row's URL changed or its tab was deleted. The result is still in the `jobs` table. If the URL moved to another row, that row shows `Archive in progress` with no job and raises a `sheet_disagrees` alert. Clear its status to archive it again.
 
 ### Logs
 

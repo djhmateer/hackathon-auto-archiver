@@ -1,13 +1,11 @@
 """
 Sheet writer: sends the waiting sheet writes to the sheets, and is the only part that writes to them. See queue-spec.md
 
-Before each write it re-reads the row. If the URL or status isn't what's expected it writes nothing and records a
-conflict, as a client may have changed the sheet. The results stay in Postgres, so nothing needs archiving again.
+Only each job's latest entry is sent, as it holds the row's current status. Before writing, it re-reads the row's
+URL: if the URL has changed, the rows have moved, so it drops the job's entries rather than write to the wrong row.
+The status cell belongs to the archiver and is overwritten. The results stay in Postgres either way.
 
     python -m auto_archiver.job_queue.writer run [--once]
-    python -m auto_archiver.job_queue.writer conflicts
-    python -m auto_archiver.job_queue.writer retry <sheet write id>
-    python -m auto_archiver.job_queue.writer discard <sheet write id>
 """
 
 import argparse
@@ -17,7 +15,7 @@ from gspread import utils as gspread_utils
 
 from auto_archiver.job_queue import db
 from auto_archiver.job_queue.db import describe_tab
-from auto_archiver.job_queue.sync import load_settings, open_spreadsheet
+from auto_archiver.job_queue.sync import load_settings, log_on_change, open_spreadsheet
 from auto_archiver.modules.gsheet_feeder_db.gsheet_feeder_db import cells_to_write
 from auto_archiver.utils.custom_logger import logger
 
@@ -25,8 +23,6 @@ READ_WRITE_SCOPES = ["https://www.googleapis.com/auth/spreadsheets", "https://ww
 WRITER_INTERVAL_SECONDS = 30
 # Sheets' limit for a cell
 MAX_CELL_LENGTH = 49999
-# an entry at a time per job, so a job can go from Queued through to its result in one cycle
-MAX_PASSES = 5
 
 
 def open_for_writing(settings: dict, spreadsheet_id: str = None):
@@ -42,25 +38,6 @@ def _letter(position: int) -> str:
     return gspread_utils.rowcol_to_a1(1, position)[:-1]
 
 
-def _check_row(entry: dict, current_url: str, current_status: str) -> tuple[bool, str | None]:
-    """The sanity check: returns (already written, conflict)"""
-    url_ok = entry["skip_url_check"] or current_url == entry["url"].strip()
-    # the writer stopped after updating the sheet last time, before it could record that
-    if url_ok and current_status == entry["cells"].get("status") != entry["expected_status"]:
-        return True, None
-    if not url_ok:
-        return False, f"Job {entry['job_id']} row {entry['row_number']}: the URL has changed"
-    # entries expect the plain in progress status, and the sheet has the worker's name after it
-    status = db.STATUS_IN_PROGRESS if db.is_in_progress(current_status) else current_status
-    if status != entry["expected_status"]:
-        return (
-            False,
-            f"Job {entry['job_id']} row {entry['row_number']}: "
-            f"status is {current_status!r}, expected {entry['expected_status']!r}",
-        )
-    return False, None
-
-
 def _log_written(entry: dict, spreadsheet_name: str, tab_title: str, changed: list[str]) -> None:
     """changed: the cells that had a different value, which were overwritten"""
     status = entry["cells"].get("status", "")
@@ -72,6 +49,15 @@ def _log_written(entry: dict, spreadsheet_name: str, tab_title: str, changed: li
     )
 
 
+def _discard(conn, entry: dict, spreadsheet_name: str, tab_title: str, reason: str) -> None:
+    message = (
+        f"{describe_tab(spreadsheet_name, tab_title)} row {entry['row_number']}, job {entry['job_id']}: {reason}, "
+        "so its sheet writes were dropped. The result is still in Postgres"
+    )
+    logger.warning(message)
+    db.discard_job_writes(conn, entry["job_id"], message)
+
+
 def _write_tab(conn, tab, entries: list[dict], settings: dict, read_ranges, spreadsheet_name: str) -> int:
     """Checks then writes one tab's entries, with one read for the headers, one for the rows and one write"""
     header, columns = settings["header"], settings["columns"]
@@ -79,14 +65,17 @@ def _write_tab(conn, tab, entries: list[dict], settings: dict, read_ranges, spre
     positions = {col: names.index(name.lower()) + 1 for col, name in columns.items() if name.lower() in names}
 
     if "url" not in positions or "status" not in positions:
-        for entry in entries:
-            db.set_conflict(conn, entry["id"], f"Job {entry['job_id']}: the tab has no url or status column")
+        # probably a header being renamed, so the entries wait and are tried again next cycle
+        log_on_change(
+            (tab.id, "writer columns"),
+            f"{describe_tab(spreadsheet_name, tab.title)}: not writing, as the tab has no url or status column",
+        )
         return 0
 
-    # each entry's URL, status and the cells it wants to write, and no others, as cells can hold 50,000 characters
+    # each entry's URL and the cells it wants to write, and no others, as cells can hold 50,000 characters
     ranges, wanted = [], []
     for entry in entries:
-        cols = ["url", "status"] + [c for c in entry["cells"] if c in positions and c not in ("url", "status")]
+        cols = ["url"] + [c for c in entry["cells"] if c in positions and c != "url"]
         wanted.append(cols)
         ranges.extend(f"{_letter(positions[c])}{entry['row_number']}" for c in cols)
     results = iter(read_ranges(ranges, tab))
@@ -94,13 +83,10 @@ def _write_tab(conn, tab, entries: list[dict], settings: dict, read_ranges, spre
     updates, written, logged = [], [], []
     for entry, cols in zip(entries, wanted):
         current = {col: _cell(next(results)) for col in cols}
-        already_written, conflict = _check_row(entry, current["url"].strip(), current["status"])
-        if conflict:
-            db.set_conflict(conn, entry["id"], conflict)
+        if not entry["skip_url_check"] and current["url"].strip() != entry["url"].strip():
+            _discard(conn, entry, spreadsheet_name, tab.title, "the URL has changed")
             continue
         written.append(entry["id"])
-        if already_written:
-            continue
         to_write = cells_to_write(
             entry["cells"],
             lambda col: col in positions,
@@ -147,14 +133,14 @@ def _write_spreadsheet(conn, spreadsheet_id: str, config_path: str, entries: lis
     for gid, tab_entries in by_tab.items():
         if gid not in tabs:
             for entry in tab_entries:
-                db.set_conflict(conn, entry["id"], f"Job {entry['job_id']}: the tab has been deleted")
+                _discard(conn, entry, spreadsheet.title, str(gid), "the tab has been deleted")
             continue
         written += _write_tab(conn, tabs[gid], tab_entries, settings, read_ranges, spreadsheet.title)
     return written
 
 
-def writer_pass(conn, opener=open_for_writing) -> int:
-    """Each job's next entry. A failure only loses that spreadsheet's turn, and it's tried again next time"""
+def writer_cycle(conn, opener=open_for_writing) -> int:
+    """Each job's latest entry. A failure only loses that spreadsheet's turn, and it's tried again next time"""
     by_spreadsheet = {}
     for entry in db.get_next_sheet_writes(conn):
         by_spreadsheet.setdefault((entry["spreadsheet_id"], entry["config"]), []).append(entry)
@@ -165,16 +151,6 @@ def writer_pass(conn, opener=open_for_writing) -> int:
             written += _write_spreadsheet(conn, spreadsheet_id, config_path, entries, opener)
         except Exception as e:
             logger.error(f"Writing to the sheet for config {config_path} failed: {e}")
-    return written
-
-
-def writer_cycle(conn, opener=open_for_writing) -> int:
-    written = 0
-    for _ in range(MAX_PASSES):
-        count = writer_pass(conn, opener)
-        written += count
-        if count == 0:
-            break
     db.beat(conn, "writer")
     return written
 
@@ -184,21 +160,7 @@ def main() -> None:
     commands = parser.add_subparsers(dest="command", required=True)
     run_parser = commands.add_parser("run", help="send the waiting sheet writes to the sheets")
     run_parser.add_argument("--once", action="store_true", help="one cycle, then exit")
-    commands.add_parser("conflicts", help="list the entries waiting on a conflict")
-    commands.add_parser("retry", help="check a conflicted entry again").add_argument("write_id", type=int)
-    commands.add_parser("discard", help="give up on a conflicted entry").add_argument("write_id", type=int)
     args = parser.parse_args()
-
-    if args.command == "conflicts":
-        with db.connect() as conn:
-            for conflict in db.get_conflicts(conn):
-                print(f"{conflict['id']}: sheet {conflict['sheet_id']}: {conflict['conflict']}")
-        return
-    if args.command in ("retry", "discard"):
-        action = db.retry_conflict if args.command == "retry" else db.discard_conflict
-        with db.connect() as conn:
-            print("Done" if action(conn, args.write_id) else f"No conflict on entry {args.write_id}")
-        return
 
     while True:
         # a new connection each time, so a Postgres restart only loses one cycle

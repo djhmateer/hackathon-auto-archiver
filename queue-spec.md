@@ -267,15 +267,17 @@ Store the sheet's raw URL in `jobs.url`, not the sanitised one, as the writer co
 
 ### Sanity check before every write
 
-The writer re-reads the row and compares the URL with `jobs.url`, unless `skip_url_check` is set, and
-the status with `sheet_writes.expected_status`. On a mismatch it writes nothing, sets `sheet_writes.conflict` and
-raises an alert. The results stay in Postgres, so nothing needs re-archiving. It does not search the
-sheet for the URL. Updates for one job go out strictly in order, so later ones wait behind a conflict.
+The writer sends only each job's latest unwritten entry, as it holds the row's current status, and marks the
+job's earlier entries written with it. It re-reads the row and compares the URL with `jobs.url`, unless
+`skip_url_check` is set. The status cell belongs to the archiver, so it isn't checked and is overwritten.
 
-A small command resolves a conflict: retry clears `conflict`, and discard sets `discarded_at`. Without
-it, rule 2 would block the row forever. A conflict is never rechecked by itself, even if the sheet looks
-right again. If the row already shows the entry's status, the writer stopped before recording an
-earlier write, so it marks the entry written rather than raising a conflict.
+On a URL mismatch the rows have moved, so it writes nothing, sets `discarded_at` on all the job's unwritten
+entries and raises a `writer_discarded` alert. The same happens if the tab has been deleted. The results stay
+in Postgres, so nothing needs re-archiving. It does not search the sheet for the URL. A tab missing its URL or
+status column, probably mid-rename, keeps its entries and is tried again each cycle.
+
+A rewrite is harmless, so a writer that stopped before recording a write just sends it again.
+`sheet_writes.expected_status` and `sheet_writes.conflict` are no longer used by the writer.
 
 The writer finds tabs by gid, so results still arrive after a rename, even one that takes the tab off
 the config's allow list. Sync connects to Google read-only, and only the writer connects read-write.
@@ -462,8 +464,7 @@ if one VM runs jobs at once, which it doesn't: each VM runs one job at a time.
 **Rollback**: `rollback <spreadsheet_id>` turns the spreadsheet off, cancels its waiting jobs and clears
 their status. It reports what's still running or unwritten, so run it again until it says cron can go
 back on. Cron must not start sooner, or it relabels running rows as `Problem in archive`. The clear step
-matters because the old feeder treats any non-blank status as finished. A conflict counts as unwritten
-until someone retries or discards it.
+matters because the old feeder treats any non-blank status as finished.
 
 Service files are in `scripts/job_queue/`.
 

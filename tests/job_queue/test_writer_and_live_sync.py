@@ -61,10 +61,6 @@ def jobs(conn):
     return conn.execute("SELECT * FROM jobs ORDER BY id").fetchall()
 
 
-def conflicts(conn):
-    return db.get_conflicts(conn)
-
-
 def claim(conn):
     jobs(conn)  # the clock on WSL2 can step back, which makes a job just added look not yet available
     return db.claim_job(conn, "vm1")
@@ -99,7 +95,6 @@ def test_a_row_from_blank_through_to_its_result(conn, sheet_id, sheet, tab):
     run_writer(conn, sheet)
     assert cell(tab, "B2") == "ok"
     assert cell(tab, "D2") == "A title"
-    assert conflicts(conn) == []
 
     run_sync(conn, sheet)
     assert len(jobs(conn)) == 1, "a finished row isn't archived again"
@@ -127,17 +122,16 @@ def test_result_is_written_over_an_in_progress_row_from_before_worker_names(conn
     db.finish_job(conn, job["id"], job["lease_token"], "done", {"status": "ok"})
     run_writer(conn, sheet)
     assert cell(tab, "B2") == "ok"
-    assert conflicts(conn) == []
 
 
-def test_one_cycle_takes_a_finished_job_through_all_its_entries_in_order(conn, sheet_id, sheet, tab):
+def test_a_finished_job_only_sends_its_result(conn, sheet_id, sheet, tab):
     run_sync(conn, sheet)
     job = claim(conn)
     db.finish_job(conn, job["id"], job["lease_token"], "done", {"status": "ok"})
-    assert run_writer(conn, sheet) == 3
-    assert cell(tab, "B2") == "ok"
+    assert run_writer(conn, sheet) == 1
     statuses = [w[0][0]["values"][0][0] for w in tab.writes]
-    assert statuses == ["Queued", "Archive in progress (vm1)", "ok"]
+    assert statuses == ["ok"]
+    assert db.get_next_sheet_writes(conn) == [], "the earlier entries count as written"
 
 
 # sync's own rules, live
@@ -201,7 +195,6 @@ def test_changed_url_cancels_clears_then_adds_the_new_one(conn, sheet_id, sheet,
 
     run_writer(conn, sheet)
     assert cell(tab, "B2") == ""
-    assert conflicts(conn) == []
 
     # the clear was written after this pass's snapshot only if they overlap, so it may take one more pass
     conn.execute("UPDATE sheet_writes SET written_at = now() - interval '1 minute'")
@@ -220,89 +213,31 @@ def test_disagreement_alerts_only_once_a_day(conn, sheet_id, sheet, tab):
 # the writer's sanity check
 
 
-def test_changed_url_is_a_conflict_and_writes_nothing(conn, sheet_id, sheet, tab):
+def test_changed_url_drops_the_jobs_writes_and_alerts(conn, sheet_id, sheet, tab):
     add_entry_job(conn, sheet_id)
     tab.rows[1][0] = "https://example.com/other"
     assert run_writer(conn, sheet) == 0
     assert tab.writes == []
-    assert "the URL has changed" in conflicts(conn)[0]["conflict"]
-    assert [a["kind"] for a in conn.execute("SELECT * FROM admin_alerts").fetchall()] == ["writer_conflict"]
+    assert db.get_next_sheet_writes(conn) == []
+    alerts = conn.execute("SELECT * FROM admin_alerts").fetchall()
+    assert [a["kind"] for a in alerts] == ["writer_discarded"]
+    assert "the URL has changed" in alerts[0]["message"]
 
 
-def test_unexpected_status_is_a_conflict_and_writes_nothing(conn, sheet_id, sheet, tab):
-    add_entry_job(conn, sheet_id)
-    tab.rows[1][1] = "a client typed this"
-    assert run_writer(conn, sheet) == 0
-    assert tab.writes == []
-    assert "a client typed this" in conflicts(conn)[0]["conflict"]
-
-
-def test_later_entries_wait_behind_a_conflict(conn, sheet_id, sheet, tab):
-    add_entry_job(conn, sheet_id)
+def test_status_a_client_typed_is_overwritten_with_the_result(conn, sheet_id, sheet, tab):
+    run_sync(conn, sheet)
+    tab.rows[1][1] = "x"
     job = claim(conn)
     db.finish_job(conn, job["id"], job["lease_token"], "done", {"status": "ok"})
-    tab.rows[1][1] = "a client typed this"
-    run_writer(conn, sheet)
-    run_writer(conn, sheet)
-    assert tab.writes == []
-    assert len(conflicts(conn)) == 1
-
-
-def test_conflict_stays_until_someone_retries_it(conn, sheet_id, sheet, tab):
-    add_entry_job(conn, sheet_id)
-    tab.rows[1][1] = "a client typed this"
-    run_writer(conn, sheet)
-    tab.rows[1][1] = ""  # the sheet looks right again, but a person decides
-    assert run_writer(conn, sheet) == 0
-    assert tab.writes == []
-    assert len(conn.execute("SELECT * FROM admin_alerts").fetchall()) == 1
-
-
-def test_conflict_blocks_the_row_until_resolved(conn, sheet_id, sheet, tab):
-    add_entry_job(conn, sheet_id)
-    tab.rows[1][1] = "a client typed this"
-    run_writer(conn, sheet)
-    tab.rows[1][1] = ""
-    run_sync(conn, sheet)
-    assert len(jobs(conn)) == 1, "rule 2: the entry is still unwritten"
-
-
-def test_retry_rechecks_a_conflict_once_the_sheet_is_fixed(conn, sheet_id, sheet, tab):
-    add_entry_job(conn, sheet_id)
-    tab.rows[1][1] = "a client typed this"
-    run_writer(conn, sheet)
-    entry = conflicts(conn)[0]
-
-    tab.rows[1][1] = ""
-    assert db.retry_conflict(conn, entry["id"]) is True
     assert run_writer(conn, sheet) == 1
-    assert cell(tab, "B2") == "Queued"
-    assert conflicts(conn) == []
+    assert cell(tab, "B2") == "ok"
 
 
-def test_discard_lets_later_entries_go_on(conn, sheet_id, sheet, tab):
-    add_entry_job(conn, sheet_id)
-    tab.rows[1][1] = "a client typed this"
-    run_writer(conn, sheet)
-    entry = conflicts(conn)[0]
-    assert db.discard_conflict(conn, entry["id"]) is True
-    assert conflicts(conn) == []
-    assert db.get_next_sheet_writes(conn) == []
-
-
-def test_retry_and_discard_need_a_conflict(conn, sheet_id):
-    add_entry_job(conn, sheet_id)
-    entry = db.get_next_sheet_writes(conn)[0]
-    assert db.retry_conflict(conn, entry["id"]) is False
-    assert db.discard_conflict(conn, entry["id"]) is False
-
-
-def test_writer_stopping_before_recording_a_write_is_not_a_conflict(conn, sheet_id, sheet, tab):
+def test_writer_stopping_before_recording_a_write_just_writes_it_again(conn, sheet_id, sheet, tab):
     add_entry_job(conn, sheet_id)
     tab.rows[1][1] = "Queued"  # it reached the sheet, but the writer stopped before setting written_at
     assert run_writer(conn, sheet) == 1
-    assert tab.writes == []
-    assert conflicts(conn) == []
+    assert cell(tab, "B2") == "Queued"
 
 
 def test_sheet_write_failing_leaves_the_entry_to_try_again(conn, sheet_id, sheet, tab, mocker):
@@ -310,7 +245,6 @@ def test_sheet_write_failing_leaves_the_entry_to_try_again(conn, sheet_id, sheet
     mocker.patch.object(tab, "batch_update", side_effect=RuntimeError("a Sheets outage"))
     assert run_writer(conn, sheet) == 0
     assert len(db.get_next_sheet_writes(conn)) == 1
-    assert conflicts(conn) == []
     assert conn.execute("SELECT written_at FROM sheet_writes").fetchone()["written_at"] is None
 
     mocker.stopall()
@@ -365,9 +299,8 @@ def test_column_the_sheet_does_not_have_is_skipped(conn, sheet_id, sheet, tab):
     job_id = add_entry_job(conn, sheet_id)
     job = claim(conn)
     db.finish_job(conn, job_id, job["lease_token"], "done", {"status": "ok", "wacz": "a link"})
-    assert run_writer(conn, sheet) == 3
+    assert run_writer(conn, sheet) == 1
     assert cell(tab, "B2") == "ok"
-    assert conflicts(conn) == []
 
 
 def test_formulas_go_in_as_formulas_and_long_text_is_cut_to_the_limit(conn, sheet_id, sheet, tab):
@@ -395,18 +328,21 @@ def test_renamed_tab_still_gets_its_results(conn, config, sheet_id, sheet, tab):
     assert cell(tab, "B2") == "Queued"
 
 
-def test_deleted_tab_is_a_conflict(conn, sheet_id, sheet):
+def test_deleted_tab_drops_the_writes(conn, sheet_id, sheet):
     add_entry_job(conn, sheet_id)
     sheet.tabs.clear()
     assert run_writer(conn, sheet) == 0
-    assert "deleted" in conflicts(conn)[0]["conflict"]
+    assert db.get_next_sheet_writes(conn) == []
+    assert "deleted" in conn.execute("SELECT message FROM admin_alerts").fetchone()["message"]
 
 
-def test_tab_with_a_renamed_status_column_is_a_conflict(conn, sheet_id, sheet, tab):
+def test_tab_with_a_renamed_status_column_waits_until_it_is_back(conn, sheet_id, sheet, tab):
     add_entry_job(conn, sheet_id)
     tab.rows[0][1] = "Something else"
     assert run_writer(conn, sheet) == 0
-    assert "no url or status column" in conflicts(conn)[0]["conflict"]
+    tab.rows[0][1] = HEADERS[1]
+    assert run_writer(conn, sheet) == 1
+    assert cell(tab, "B2") == "Queued"
 
 
 def test_writer_connects_read_write_and_sync_read_only(mocker):
@@ -444,7 +380,6 @@ def test_cancelling_a_job_requeued_after_a_claim_clears_the_row(conn, sheet_id, 
     db.release_setup_failure(conn, job["id"], job["lease_token"])
     assert db.cancel_job(conn, job["id"])
     run_writer(conn, sheet)
-    assert conflicts(conn) == []
     assert cell(tab, "B2") == ""
 
 
@@ -530,13 +465,3 @@ def test_registering_again_updates_the_config_but_sync_does_not(conn, config, sh
     db.save_tab(conn, "spreadsheet1", tab.id, "New title", CONFIG)
     current = db.get_sheets(conn)[0]
     assert (current["config"], current["worksheet"]) == ("moved.yaml", "New title")
-
-
-def test_a_discarded_conflict_cannot_be_retried_or_discarded_again(conn, sheet_id, sheet, tab):
-    add_entry_job(conn, sheet_id)
-    tab.rows[1][1] = "a client typed this"
-    run_writer(conn, sheet)
-    entry = conflicts(conn)[0]["id"]
-    assert db.discard_conflict(conn, entry) is True
-    assert db.discard_conflict(conn, entry) is False
-    assert db.retry_conflict(conn, entry) is False

@@ -167,7 +167,7 @@ def log_startup(conn) -> None:
     summary = db.get_queue_summary(conn)
     logger.info(
         f"Queue: {summary['queued']} queued, {summary['running']} running, {summary['unwritten']} sheet writes to do, "
-        f"{summary['conflicts']} conflicts, {summary['unsent_alerts']} unsent alerts"
+        f"{summary['unsent_alerts']} unsent alerts"
     )
 
 
