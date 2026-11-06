@@ -39,15 +39,25 @@ FACEBOOK_STORY_URL_REGEX = re.compile(r"facebook\.com/stories/", re.IGNORECASE)
 IMPERVA_BLOCK_TEXT = re.compile(r"blocked by our security service|incapsula incident id", re.IGNORECASE)
 IMPERVA_NAME = re.compile(r"imperva|incapsula", re.IGNORECASE)
 
+# DM 6th Nov 26 - DataDome's "Verification Required - Slide right to secure your access" page, eg reuters.com. The
+# text is inside an iframe, so match the challenge host the top page loads it from (real pages load js.datadome.co)
+DATADOME_BLOCK_TEXT = re.compile(r"captcha-delivery\.com", re.IGNORECASE)
 
-def is_imperva_block_page(driver) -> bool:
-    """True if the browser was given Imperva's block page instead of the page"""
+
+def block_page_vendor(driver) -> str | None:
+    """'Imperva' or 'DataDome' if the browser was given their block page instead of the page, else None"""
     try:
         page_source = driver.page_source
     except Exception as e:
-        logger.debug(f"Couldn't read the page source to check for an Imperva block page: {e}")
-        return False
-    return isinstance(page_source, str) and bool(IMPERVA_BLOCK_TEXT.search(page_source) and IMPERVA_NAME.search(page_source))
+        logger.debug(f"Couldn't read the page source to check for a block page: {e}")
+        return None
+    if not isinstance(page_source, str):
+        return None
+    if IMPERVA_BLOCK_TEXT.search(page_source) and IMPERVA_NAME.search(page_source):
+        return "Imperva"
+    if DATADOME_BLOCK_TEXT.search(page_source):
+        return "DataDome"
+    return None
 
 
 # DM 22nd Oct 26 - save_screenshot only captures the window (eg 1280x1911 of a 2048 high one), so take the whole page.
@@ -181,10 +191,11 @@ class ScreenshotEnricher(Enricher):
                     if not save_full_page_screenshot(driver, screenshot_file):
                         driver.save_screenshot(screenshot_file)
                 logger.debug(f"Saved screenshot to {screenshot_file} and about to add to metadata")
-                if is_imperva_block_page(driver):
+                vendor = block_page_vendor(driver)
+                if vendor:
                     # DM 22nd Oct 26 - kept as evidence, but under another id so it isn't the sheet's screenshot (the
                     # crawler's is used instead, as it often gets through eg with its browser profile)
-                    logger.warning(f"Screenshot of {url} is Imperva's 'Access denied' block page, not the page")
+                    logger.warning(f"Screenshot of {url} is {vendor}'s block page, not the page")
                     to_enrich.add_media(Media(filename=screenshot_file), id="webdriverscreenshot_blocked")
                     to_enrich.add_status_note("screenshot blocked by site")
                 else:

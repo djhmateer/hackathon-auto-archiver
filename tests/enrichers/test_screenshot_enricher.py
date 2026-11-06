@@ -361,30 +361,40 @@ IMPERVA_ERROR_15 = """<html><head><title>Access denied</title></head><body><div>
 </body></html>"""
 
 
+# shaped like DataDome's challenge page, which loads the slider in an iframe from its captcha host
+DATADOME_CHALLENGE = """<html><head><title>example.com</title></head><body>
+<script>var dd={'rt':'c','cid':'<cid>','hsh':'<hsh>','host':'geo.captcha-delivery.com'}</script>
+<script src="https://ct.captcha-delivery.com/c.js"></script></body></html>"""
+
+
 @pytest.mark.parametrize(
-    "page_source, blocked",
+    "page_source, vendor",
     [
-        (IMPERVA_ERROR_15, True),
+        (IMPERVA_ERROR_15, "Imperva"),
         (
             "<html><body>Request unsuccessful. Incapsula incident ID: 123-456</body></html>",
-            True,
+            "Imperva",
         ),
-        ("<html><body><h1>The 36th Division Began Preparing</h1></body></html>", False),
+        (DATADOME_CHALLENGE, "DataDome"),
+        ("<html><body><h1>The 36th Division Began Preparing</h1></body></html>", None),
         # an article about Imperva isn't its block page
-        ("<html><body>Imperva said the attack was blocked by its firewall</body></html>", False),
+        ("<html><body>Imperva said the attack was blocked by its firewall</body></html>", None),
+        # a real page protected by DataDome loads its tag, not the challenge
+        ('<html><head><script src="https://js.datadome.co/tags.js"></script></head><body>Article</body></html>', None),
     ],
 )
-def test_is_imperva_block_page(mocker, page_source, blocked):
-    from auto_archiver.modules.screenshot_enricher.screenshot_enricher import is_imperva_block_page
+def test_block_page_vendor(mocker, page_source, vendor):
+    from auto_archiver.modules.screenshot_enricher.screenshot_enricher import block_page_vendor
 
-    assert is_imperva_block_page(mocker.MagicMock(page_source=page_source)) is blocked
+    assert block_page_vendor(mocker.MagicMock(page_source=page_source)) == vendor
 
 
-def test_imperva_block_page_screenshot_is_kept_but_not_as_the_screenshot(
-    screenshot_enricher, metadata_with_video, mock_selenium_env, common_patches
+@pytest.mark.parametrize("page_source", [IMPERVA_ERROR_15, DATADOME_CHALLENGE])
+def test_block_page_screenshot_is_kept_but_not_as_the_screenshot(
+    screenshot_enricher, metadata_with_video, mock_selenium_env, common_patches, page_source
 ):
     mock_driver, _, _ = mock_selenium_env
-    mock_driver.page_source = IMPERVA_ERROR_15
+    mock_driver.page_source = page_source
 
     screenshot_enricher.enrich(metadata_with_video)
 
