@@ -60,6 +60,8 @@ docker pull webrecorder/browsertrix-crawler
 POT_VERSION="$(poetry run python -c "from importlib.metadata import version; print(version('bgutil-ytdlp-pot-provider'))")"
 POT_IMAGE="brainicism/bgutil-ytdlp-pot-provider:$POT_VERSION"
 docker pull "$POT_IMAGE"
+# a pull leaves the image it replaced behind, untagged (browsertrix is 3.6 GB). Removes only untagged images
+docker image prune -f
 
 echo "== Restarting bgutil-provider on $POT_IMAGE"
 docker rm -f bgutil-provider

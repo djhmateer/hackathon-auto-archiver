@@ -42,7 +42,10 @@ echo "=== Firefox and geckodriver, for screenshots"
 wget -qO- https://packages.mozilla.org/apt/repo-signing-key.gpg | sudo tee /etc/apt/keyrings/packages.mozilla.org.asc >/dev/null
 echo "deb [signed-by=/etc/apt/keyrings/packages.mozilla.org.asc] https://packages.mozilla.org/apt mozilla main" |
     sudo tee /etc/apt/sources.list.d/mozilla.list >/dev/null
-printf 'Package: *\nPin: origin packages.mozilla.org\nPin-Priority: 1000\n' | sudo tee /etc/apt/preferences.d/mozilla >/dev/null
+# DM 9th Nov 26 - and never Ubuntu's firefox: unattended-upgrade ignores the 1000 pin and swapped Mozilla's deb for
+# Ubuntu's 1:1snap1 package (the snap), as its epoch makes it look newer
+printf 'Package: *\nPin: origin packages.mozilla.org\nPin-Priority: 1000\n\nPackage: firefox*\nPin: release o=Ubuntu\nPin-Priority: -1\n' |
+    sudo tee /etc/apt/preferences.d/mozilla >/dev/null
 sudo apt-get update
 sudo apt-get install -y firefox
 

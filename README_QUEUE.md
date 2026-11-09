@@ -10,6 +10,7 @@ How to install, run, deploy and operate the Postgres job queue. The design, and 
 - [Installing a coordinator VM](#installing-a-coordinator-vm)
 - [Installing a worker VM](#installing-a-worker-vm)
 - [Deploying updates](#deploying-updates)
+- [Updating the OS](#updating-the-os)
 - [Moving a spreadsheet from cron to the queue](#moving-a-spreadsheet-from-cron-to-the-queue)
 - [Stopping a worker](#stopping-a-worker)
 - [Monitoring](#monitoring)
@@ -137,10 +138,12 @@ Before deploying, both scripts:
 
 Service accounts, cookies and sessions are not copied automatically. If you deploy by hand, the configs aren't copied either, so copy any that have changed.
 
+Both scripts install Python packages exactly as pinned in the committed `poetry.lock`. To update packages, run `poetry update` on your own machine, run the tests, then commit and push the lock file. Never run `poetry update` on a VM: it changes `poetry.lock` there, and the next deploy's `git pull` then fails.
+
 ### Coordinator
 
 ```bash
-bash scripts/job_queue/deploy-coordinator.sh                         # stop, pull, install, migrate, start
+bash scripts/job_queue/deploy-coordinator.sh                         # stop, pull, sync packages, migrate, start
 bash scripts/job_queue/deploy-coordinator.sh --reset-except-sheets   # the same, then empty the queue
 ```
 
@@ -156,7 +159,7 @@ To deploy by hand, on the coordinator VM:
 
 ```bash
 git pull origin main
-poetry install --only main
+poetry sync --only main                    # sync, not install, so removed packages are uninstalled
 poetry run python -m auto_archiver.job_queue.migrate
 sudo systemctl restart aa-coordinator
 ```
@@ -169,6 +172,13 @@ bash scripts/job_queue/deploy-workers.sh
 
 The script runs the same checks, then updates one worker at a time, so only one is down at once. **It kills running jobs rather than waiting for them.** Each killed job is retried within about 9 minutes: the lease expires after 5, cleanup requeues it 2 minutes after that, and the job becomes claimable 2 minutes later.
 
+On each worker, after syncing the packages, it also updates the Docker images:
+
+- pulls `webrecorder/browsertrix-crawler:latest`, which the code runs untagged;
+- pulls the `brainicism/bgutil-ytdlp-pot-provider` image whose tag matches the installed `bgutil-ytdlp-pot-provider` plugin (from `poetry.lock`), because the YouTube token server and the plugin must be the same version;
+- runs `docker image prune -f`, which removes only untagged images, such as the browsertrix image a pull replaced (3.6 GB each);
+- recreates the `bgutil-provider` container on that image, checks that the container is running it, and prints its `/ping` reply, which includes the version. A few `curl: (52)` or `(56)` lines before the reply are normal while the server starts.
+
 To deploy by hand without killing the running job, on each worker VM:
 
 ```bash
@@ -178,6 +188,25 @@ git pull origin main
 poetry sync --only main                    # sync, not install, so removed packages are uninstalled
 sudo systemctl start aa-worker-supervisor
 ```
+
+The Docker images aren't updated when you deploy by hand. To update them, follow the steps in `scripts/job_queue/deploy-workers.sh`.
+
+## Updating the OS
+
+```bash
+bash scripts/job_queue/update-os.sh
+```
+
+This upgrades the Ubuntu packages on the coordinator, then on each worker in turn, and reboots each VM. The upgrade includes Firefox, Chrome and Docker, which come from their own apt repos. Ubuntu's automatic updates don't cover those repos. It is kept separate from the deploys, so that a problem with new code and a problem with an OS update can be told apart. Run it every few weeks, when the queue is quiet.
+
+For each VM, the script:
+
+1. stops the service. On a worker, it first kills the running job, as `deploy-workers.sh` does;
+2. runs `apt-get update` and `apt-get upgrade` without prompting. Edited config files are kept, and new dependencies such as a new kernel are installed, but nothing is removed;
+3. reboots, then waits up to 5 minutes for the VM to come back. It checks that the boot id has changed, so that a VM that hasn't gone down yet isn't mistaken for one that's back;
+4. waits for the service to start on its own, then prints the kernel version and the last log lines. On a worker it also prints the Firefox, Chrome, Docker and `bgutil-provider` versions; on the coordinator, the Postgres version.
+
+The coordinator goes first. While it reboots, no jobs are claimed, and running jobs keep retrying their database writes for about 5 minutes, which is longer than a reboot takes. The script stops at the first step that fails, before it moves on to the next VM. It needs passwordless `sudo` for `apt-get`, as the deploys do for `systemctl`. It doesn't run `apt autoremove`, so old kernels build up in `/boot` over time.
 
 ## Moving a spreadsheet from cron to the queue
 
