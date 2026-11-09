@@ -381,6 +381,9 @@ DATADOME_CHALLENGE = """<html><head><title>example.com</title></head><body>
         ("<html><body>Imperva said the attack was blocked by its firewall</body></html>", None),
         # a real page protected by DataDome loads its tag, not the challenge
         ('<html><head><script src="https://js.datadome.co/tags.js"></script></head><body>Article</body></html>', None),
+        # a page that only mentions the challenge host, eg an article about DataDome, isn't its block page
+        ("<html><body>DataDome serves its challenge from geo.captcha-delivery.com</body></html>", None),
+        ('<html><head><link rel="preconnect" href="https://geo.captcha-delivery.com"></head><body>Article</body></html>', None),
     ],
 )
 def test_block_page_vendor(mocker, page_source, vendor):

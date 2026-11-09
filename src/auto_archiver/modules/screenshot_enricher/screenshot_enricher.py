@@ -42,6 +42,9 @@ IMPERVA_NAME = re.compile(r"imperva|incapsula", re.IGNORECASE)
 # DM 6th Nov 26 - DataDome's "Verification Required - Slide right to secure your access" page, eg reuters.com. The
 # text is inside an iframe, so match the challenge host the top page loads it from (real pages load js.datadome.co)
 DATADOME_BLOCK_TEXT = re.compile(r"captcha-delivery\.com", re.IGNORECASE)
+# DM 9th Nov 26 - and the challenge's inline config (var dd={'rt':'c',...,'host':'geo.captcha-delivery.com'}), so a page
+# that only mentions the host, eg an article about DataDome, isn't taken for its block page
+DATADOME_CONFIG = re.compile(r"\bvar\s+dd\s*=\s*\{")
 
 
 def block_page_vendor(driver) -> str | None:
@@ -55,7 +58,7 @@ def block_page_vendor(driver) -> str | None:
         return None
     if IMPERVA_BLOCK_TEXT.search(page_source) and IMPERVA_NAME.search(page_source):
         return "Imperva"
-    if DATADOME_BLOCK_TEXT.search(page_source):
+    if DATADOME_BLOCK_TEXT.search(page_source) and DATADOME_CONFIG.search(page_source):
         return "DataDome"
     return None
 

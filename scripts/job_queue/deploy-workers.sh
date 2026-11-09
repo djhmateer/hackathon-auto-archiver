@@ -68,7 +68,8 @@ if [ "$(docker inspect -f '{{.Image}}' bgutil-provider)" != "$(docker image insp
     echo "bgutil-provider isn't running $POT_IMAGE" >&2
     exit 1
 fi
-curl -fsS --retry 5 --retry-connrefused --retry-delay 2 http://localhost:4416/ping
+# retry any error: while the server starts, docker accepts the connection and resets it (curl 56), not refuses it
+curl -fsS --retry 10 --retry-all-errors --retry-delay 2 http://localhost:4416/ping
 echo
 
 echo "== Starting aa-worker-supervisor"
