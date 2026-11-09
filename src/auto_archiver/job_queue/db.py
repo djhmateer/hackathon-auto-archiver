@@ -114,10 +114,20 @@ def now(conn: psycopg.Connection):
     return conn.execute("SELECT now() AS now").fetchone()["now"]
 
 
-def beat(conn: psycopg.Connection, name: str) -> None:
+# what a worker sends with its heartbeat, from machine_stats() in worker_supervisor.py
+STAT_COLUMNS = ("disk_free_bytes", "mem_available_bytes", "mem_total_bytes", "swap_used_bytes")
+
+
+def beat(conn: psycopg.Connection, name: str, git_commit: str = None, stats: dict = None) -> None:
+    stats = stats or {}
     conn.execute(
-        "INSERT INTO heartbeats (name) VALUES (%s) ON CONFLICT (name) DO UPDATE SET beat_at = now()",
-        (name,),
+        f"""
+        INSERT INTO heartbeats (name, git_commit, {", ".join(STAT_COLUMNS)})
+        VALUES (%s, %s, {", ".join(["%s"] * len(STAT_COLUMNS))})
+        ON CONFLICT (name) DO UPDATE SET beat_at = now(), git_commit = EXCLUDED.git_commit,
+            {", ".join(f"{column} = EXCLUDED.{column}" for column in STAT_COLUMNS)}
+        """,
+        (name, git_commit, *(stats.get(column) for column in STAT_COLUMNS)),
     )
 
 
@@ -216,11 +226,11 @@ def get_queue_summary(conn: psycopg.Connection) -> dict:
 
 
 def get_worker_heartbeats(conn: psycopg.Connection) -> list[dict]:
-    """Each worker supervisor's name and how many seconds ago it last beat"""
+    """Each worker supervisor's name, how many seconds ago it last beat, and what it sent with the beat"""
     return conn.execute(
-        """
+        f"""
         SELECT substr(name, length('worker-supervisor-') + 1) AS worker,
-            extract(epoch FROM now() - beat_at)::int AS seconds_ago
+            extract(epoch FROM now() - beat_at)::int AS seconds_ago, git_commit, {", ".join(STAT_COLUMNS)}
         FROM heartbeats WHERE name LIKE 'worker-supervisor-%' ORDER BY name
         """
     ).fetchall()

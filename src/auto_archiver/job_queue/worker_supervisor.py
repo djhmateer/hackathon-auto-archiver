@@ -137,6 +137,21 @@ def git_commit() -> str:
         return "unknown"
 
 
+def machine_stats(path: str) -> dict:
+    """Free disk where path is, and memory and swap from /proc/meminfo, in bytes, for the heartbeat (db.STAT_COLUMNS)"""
+    meminfo = {}
+    with open("/proc/meminfo") as f:
+        for line in f:
+            name, value = line.split(":", 1)
+            meminfo[name] = int(value.split()[0]) * 1024  # in kB
+    return {
+        "disk_free_bytes": shutil.disk_usage(path).free,
+        "mem_available_bytes": meminfo["MemAvailable"],
+        "mem_total_bytes": meminfo["MemTotal"],
+        "swap_used_bytes": meminfo["SwapTotal"] - meminfo["SwapFree"],
+    }
+
+
 def describe_duration(seconds: float) -> str:
     minutes, seconds = divmod(int(seconds), 60)
     return f"{minutes}m {seconds}s"
@@ -393,7 +408,7 @@ class WorkerSupervisor:
                 # a new connection each time, so a Postgres restart only loses a few ticks
                 with db.connect() as conn:
                     self.tick(conn)
-                    db.beat(conn, f"worker-supervisor-{self.worker}")
+                    db.beat(conn, f"worker-supervisor-{self.worker}", self.git_commit, machine_stats(self.dir))
             except Exception as e:
                 logger.error(f"Supervisor tick failed, jobs carry on running: {e}")
             time.sleep(TICK_SECONDS)

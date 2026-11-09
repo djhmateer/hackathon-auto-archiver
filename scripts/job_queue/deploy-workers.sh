@@ -9,7 +9,7 @@
 set -euo pipefail
 
 HOST=192.168.1.212
-PORTS="341 342"     # worker41, worker42
+PORTS="341 342"     # glanworker1, glanworker2
 
 # The workers pull from GitHub, so refuse to deploy anything that isn't committed and pushed
 cd "$(dirname "$0")/../.."

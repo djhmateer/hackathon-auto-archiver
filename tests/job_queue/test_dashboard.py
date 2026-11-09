@@ -45,7 +45,8 @@ def finish(conn, job, status, sheet_status) -> None:
 
 def test_an_empty_queue_renders_every_section(conn):
     screen = dashboard.render(conn)
-    for title in ("Auto Archiver queue", "Workers", "Sheets", "Waiting", "Last 10 finished", "Alerts"):
+    titles = ("Auto Archiver queue", "Workers", "Sheets", "Waiting", "Sites", "Storage", "Last 5 failed", "Alerts")
+    for title in (*titles, "Last 10 finished"):
         assert title in screen
     assert f"{RED}no heartbeat ever" in screen
     assert f"{RED}  No worker has ever sent a heartbeat" in screen
@@ -70,7 +71,7 @@ def test_a_worker_shows_its_running_job_and_todays_counts(conn):
     finish(conn, run_job(conn, sheet_id, 2, "site1.com"), "done", "wacz: success")
     finish(conn, run_job(conn, sheet_id, 3, "site2.com"), "failed", "Archive failed no archiver")
     running = run_job(conn, sheet_id, 4, "site3.com")
-    line = next(line for line in dashboard.workers(conn) if "worker41" in line)
+    line = "\n".join(dashboard.workers(conn, "abc1234"))
     assert f"{GREEN}1{dashboard.RESET} done, {YELLOW}1{dashboard.RESET} failed" in line
     assert f"job {running['id']} Sheet 'Sheet A' tab tab1 row 4 site3.com" in line
 
@@ -131,10 +132,10 @@ def test_alerts_show_unsent_in_red_and_only_the_first_line(conn):
 def test_backup_is_green_when_recent_and_red_when_old(conn, backup_dir):
     backup = backup_dir / "auto_archiver_Mon.dump"
     backup.write_bytes(b"x")
-    assert f"Last backup: {GREEN}" in "\n".join(dashboard.header(conn))
+    assert f"Last backup: {GREEN}" in "\n".join(dashboard.header(conn, "abc1234", {}))
     two_days_ago = time.time() - 2 * 24 * 60 * 60
     os.utime(backup, (two_days_ago, two_days_ago))
-    assert f"Last backup: {RED}2d 0h ago" in "\n".join(dashboard.header(conn))
+    assert f"Last backup: {RED}2d 0h ago" in "\n".join(dashboard.header(conn, "abc1234", {}))
 
 
 @pytest.mark.parametrize(
@@ -157,3 +158,90 @@ def test_sheets_show_what_sync_last_read(conn):
     assert RED + "never" in lines[1]
     assert RED + "5m ago" in lines[2]
     assert dashboard.DIM + "never" in lines[3]
+
+
+GB = dashboard.GB
+STATS = {"disk_free_bytes": 20 * GB, "mem_available_bytes": 2 * GB, "mem_total_bytes": 4 * GB, "swap_used_bytes": 0}
+
+
+def test_a_worker_shows_its_code_and_machine(conn):
+    db.beat(conn, "worker-supervisor-worker41", "abc1234", STATS)
+    db.beat(conn, "worker-supervisor-worker42", "old5678", {**STATS, "disk_free_bytes": 3 * GB})
+    db.beat(conn, "worker-supervisor-worker43")  # not deployed since the heartbeat details were added
+    screen = "\n".join(dashboard.workers(conn, "abc1234"))
+    assert f"code {GREEN}abc1234" in screen
+    assert f"code {RED}old5678" in screen  # missed a deploy
+    assert f"code {YELLOW}?" in screen
+    assert f"disk {GREEN}20.0 GB{dashboard.RESET} free, memory {GREEN}2.0 of 4.0 GB{dashboard.RESET} free" in screen
+    assert f"disk {RED}3.0 GB" in screen
+    assert "disk, memory and swap ?" in screen
+
+
+@pytest.mark.parametrize(
+    "stats, expected",
+    [
+        ({"disk_free_bytes": 8 * GB}, f"disk {YELLOW}8.0 GB"),
+        ({"mem_available_bytes": GB // 2}, f"memory {YELLOW}0.5 of 4.0 GB"),
+        ({"mem_available_bytes": GB // 5}, f"memory {RED}0.2 of 4.0 GB"),
+        ({"swap_used_bytes": 2 * GB}, f"swap {YELLOW}2048 MB"),
+    ],
+)
+def test_machine_colours(stats, expected):
+    assert expected in dashboard.machine({**STATS, **stats})
+
+
+def test_the_coordinators_machine_is_in_the_header(conn):
+    screen = "\n".join(dashboard.header(conn, "abc1234", STATS))
+    assert "code abc1234" in screen
+    assert f"disk {GREEN}20.0 GB" in screen
+
+
+def test_speed_counts_finished_jobs_and_the_oldest_queued(conn):
+    sheet_id = add_sheet(conn)
+    finish(conn, run_job(conn, sheet_id, 2, "site1.com"), "done", "wacz: success")
+    old = add_job(conn, sheet_id, 3, "site2.com")
+    conn.execute("UPDATE jobs SET added_at = now() - interval '2 hours' WHERE id = %s", (old,))
+    screen = "\n".join(dashboard.header(conn, "abc1234", STATS))
+    assert (
+        "Speed: 1 finished in the last hour, 1 in the last 24h, oldest queued job added " + YELLOW + "2h 0m" in screen
+    )
+
+
+def test_sites_count_done_failed_and_blocked(conn):
+    sheet_id = add_sheet(conn)
+    finish(conn, run_job(conn, sheet_id, 2, "site1.com"), "done", "wacz: success")
+    finish(conn, run_job(conn, sheet_id, 3, "site1.com"), "failed", "Archive failed no archiver")
+    finish(conn, run_job(conn, sheet_id, 4, "site1.com"), "done", "no archiver (blocked by site - please requeue)")
+    finish(conn, run_job(conn, sheet_id, 5, "site2.com"), "done", "wacz: success")
+    lines = dashboard.sites(conn)
+    plain = [re.sub(r"\033\[\d+m", "", line) for line in lines]
+    assert plain[2].split()[:4] == ["site1.com", "1", "1", "1"]  # busiest first
+    assert plain[3].split()[:4] == ["site2.com", "1", "0", "0"]
+    assert RED + "      1" in lines[2]  # blocked
+
+
+def test_storage_totals_files_and_flags_failures(conn):
+    sheet_id = add_sheet(conn)
+    job = run_job(conn, sheet_id, 2, "site1.com")
+    db.finish_job(
+        conn,
+        job["id"],
+        job["lease_token"],
+        "done",
+        {"status": "wacz: success"},
+        result={"store_failures": 2},
+        files=[{"role": "", "key": "a/1.mp4", "bytes": GB}, {"role": "screenshot", "key": "a/2.png", "bytes": GB}],
+    )
+    line = dashboard.storage(conn)[0]
+    assert "Storage (24h): 2 files, 2.00 GB stored" in line
+    assert f"{RED}1 job(s) with files that couldn't be stored: job {job['id']} (2)" in line
+
+
+def test_failures_lists_only_failed_and_blocked_jobs(conn):
+    sheet_id = add_sheet(conn)
+    finish(conn, run_job(conn, sheet_id, 2, "site1.com"), "done", "wacz: success")
+    finish(conn, run_job(conn, sheet_id, 3, "site2.com"), "failed", "Archive failed no archiver")
+    finish(conn, run_job(conn, sheet_id, 4, "site3.com"), "done", "no archiver (blocked by site - please requeue)")
+    screen = "\n".join(dashboard.failures(conn))
+    assert "site1.com" not in screen
+    assert "row 3 site2.com" in screen and "row 4 site3.com" in screen

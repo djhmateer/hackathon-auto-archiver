@@ -663,3 +663,11 @@ def test_git_commit_without_changes(mocker):
 
     mocker.patch("auto_archiver.job_queue.worker_supervisor.subprocess.run", side_effect=fake_run)
     assert worker_supervisor.git_commit() == "abc1234"
+
+
+def test_machine_stats_reads_disk_memory_and_swap(tmp_path):
+    stats = worker_supervisor.machine_stats(str(tmp_path))
+    assert set(stats) == set(db.STAT_COLUMNS)
+    assert stats["disk_free_bytes"] > 0
+    assert 0 < stats["mem_available_bytes"] <= stats["mem_total_bytes"]
+    assert stats["swap_used_bytes"] >= 0
