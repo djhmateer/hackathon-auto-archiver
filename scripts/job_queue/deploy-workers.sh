@@ -1,5 +1,7 @@
 #!/bin/bash
-# Deploys main to each worker VM over SSH, one at a time: kill the running job, stop, pull, sync, start.
+# Deploys main to each worker VM over SSH, one at a time: kill the running job, stop, pull, sync, update the docker
+# images and restart bgutil-provider, start.
+# Packages come from the committed poetry.lock: run poetry update locally, test and push, never on the VMs.
 # Deploy the coordinator first if there's a new migration, as workers don't migrate.
 #
 #   bash scripts/job_queue/deploy-workers.sh
@@ -50,6 +52,24 @@ git log -1 --oneline
 
 echo "== Syncing packages"
 poetry sync --only main
+
+echo "== Updating docker images"
+# the code runs browsertrix-crawler untagged, ie latest
+docker pull webrecorder/browsertrix-crawler
+# the bgutil server should match the bgutil-ytdlp-pot-provider plugin that yt-dlp loads, so use the plugin's version
+POT_VERSION="$(poetry run python -c "from importlib.metadata import version; print(version('bgutil-ytdlp-pot-provider'))")"
+POT_IMAGE="brainicism/bgutil-ytdlp-pot-provider:$POT_VERSION"
+docker pull "$POT_IMAGE"
+
+echo "== Restarting bgutil-provider on $POT_IMAGE"
+docker rm -f bgutil-provider
+docker run --name bgutil-provider --restart unless-stopped -d -p 4416:4416 "$POT_IMAGE"
+if [ "$(docker inspect -f '{{.Image}}' bgutil-provider)" != "$(docker image inspect -f '{{.Id}}' "$POT_IMAGE")" ]; then
+    echo "bgutil-provider isn't running $POT_IMAGE" >&2
+    exit 1
+fi
+curl -fsS --retry 5 --retry-connrefused --retry-delay 2 http://localhost:4416/ping
+echo
 
 echo "== Starting aa-worker-supervisor"
 sudo systemctl start aa-worker-supervisor

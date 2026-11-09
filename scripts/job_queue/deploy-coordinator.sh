@@ -1,5 +1,6 @@
 #!/bin/bash
-# Deploys main to the coordinator VM over SSH: stop, pull, install, migrate, start.
+# Deploys main to the coordinator VM over SSH: stop, pull, sync, migrate, start.
+# Packages come from the committed poetry.lock: run poetry update locally, test and push, never on the VM.
 # --reset-except-sheets also empties every queue table except sheets (and schema_migrations), to start again.
 #
 #   bash scripts/job_queue/deploy-coordinator.sh [--reset-except-sheets]
@@ -51,8 +52,9 @@ echo "== Pulling main"
 git pull origin main
 git log -1 --oneline
 
-echo "== Installing"
-poetry install --only main
+echo "== Syncing packages"
+# sync, not install, so packages dropped from poetry.lock are removed too
+poetry sync --only main
 
 echo "== Migrating"
 poetry run python -m auto_archiver.job_queue.migrate
