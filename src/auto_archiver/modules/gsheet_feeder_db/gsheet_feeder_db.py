@@ -273,13 +273,25 @@ class GsheetsFeederDB(Feeder, Database):
     # DM 10th Jun 25 - This is the 4.DB step done step ie updating the spreadsheet with the archival results
     def done(self, item: Metadata, cached: bool = False) -> None:
         """archival result ready - should be saved to DB"""
-        logger.success(f"DONE {item.get_url()}")
+        # DM 5th Nov 26 - done() runs for every row, including ones where no extractor succeeded.
+        # Logging SUCCESS "DONE" for those made failed rows look like successes in 3success.log
+        # and aa_logs, so log them as WARNING instead.
+        # DM 9th Nov 26 - keep the line as "DONE <url>" with nothing after the URL, at any level: aa-dashboard
+        # counts processed rows from it, and the STARTED to DONE timings use it
+        succeeded = item.is_success()
+        log = logger.success if succeeded else logger.warning
+        log(f"DONE {item.get_url()}")
         gw, row = self._retrieve_gsheet(item)
 
-        # DM - success log message showing the row, sheet and tab
+        # DM - log message showing the row, sheet and tab
         spreadsheet = gw.wks.spreadsheet.title
         worksheet = gw.wks.title
-        logger.success(f" row {row} on {spreadsheet} : {worksheet}")
+        if succeeded:
+            logger.success(f" row {row} on {spreadsheet} : {worksheet}")
+        else:
+            logger.warning(
+                f" row {row} on {spreadsheet} : {worksheet} without a successful capture, status={item.status!r}"
+            )
 
         row_values = gw.get_row(row)
 
