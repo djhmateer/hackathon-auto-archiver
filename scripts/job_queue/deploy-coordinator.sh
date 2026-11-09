@@ -1,5 +1,6 @@
 #!/bin/bash
-# Deploys main to the coordinator VM over SSH: stop, pull, sync, migrate, start.
+# Deploys main to the coordinator VM over SSH: stop, pull, sync, back up the database, migrate, start.
+# Also makes sure the nightly database backup is in the coordinator's crontab (see backup-db.sh).
 # Also copies the alert email settings (POSTMARK_API_TOKEN, POSTMARK_FROM_EMAIL, ALERT_EMAIL_TO) from your .env.
 # Packages come from the committed poetry.lock: run poetry update locally, test and push, never on the VM.
 # --reset-except-sheets also empties every queue table except sheets (and schema_migrations), to start again.
@@ -35,7 +36,7 @@ fi
 
 # secrets/ isn't in git. The coordinator writes the sheet cells using its copy's columns, and the workers archive with
 # theirs, so copy them to all three whichever script is run (DM 4th Nov 26 - a stale coordinator copy dropped new columns)
-CONFIGS="secrets/orchestration-aa-dave-testing.yaml secrets/orchestration-aa-clienta.yaml secrets/orchestration-aa-clientb.yaml"
+CONFIGS="secrets/orchestration-aa-dave-testing.yaml secrets/orchestration-aa-clienta.yaml secrets/orchestration-aa-clientb.yaml secrets/orchestration-glan-sheet4.yaml"
 for CONFIG_PORT in 340 341 342; do
     echo "== Copying $CONFIGS to $HOST port $CONFIG_PORT"
     scp -q -P "$CONFIG_PORT" $CONFIGS "$HOST:/home/dave/auto-archiver/secrets/"
@@ -74,6 +75,22 @@ git log -1 --oneline
 echo "== Syncing packages"
 # sync, not install, so packages dropped from poetry.lock are removed too
 poetry sync --only main
+
+# before a migration or --reset-except-sheets changes anything. pg_dump takes a consistent snapshot, so the workers can run
+echo "== Backing up the database"
+bash scripts/job_queue/backup-db.sh
+
+echo "== Nightly backup at 02:30 UTC"
+mkdir -p "$HOME/backups"
+CRON_LINE="30 2 * * * bash $PWD/scripts/job_queue/backup-db.sh >> $HOME/backups/backup.log 2>&1"
+EXISTING="$(crontab -l 2>/dev/null || true)"
+if grep -qxF "$CRON_LINE" <<<"$EXISTING"; then
+    echo "already in the crontab"
+else
+    # keeps any other cron lines, and replaces an older backup line
+    { grep -vE "backup-db\.sh|^$" <<<"$EXISTING" || true; echo "$CRON_LINE"; } | crontab -
+    echo "added to the crontab: $CRON_LINE"
+fi
 
 echo "== Migrating"
 poetry run python -m auto_archiver.job_queue.migrate

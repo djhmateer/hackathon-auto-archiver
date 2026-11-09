@@ -15,8 +15,14 @@ import requests
 from auto_archiver.job_queue import db
 from auto_archiver.utils.custom_logger import logger
 
-# site_blocked: queue_feeder_db, when a site we expect to let us back in blocked the archiver
-EMAIL_KINDS = ("site_blocked",)
+EMAIL_KINDS = (
+    "site_blocked",  # queue_feeder_db: a site we expect to let us back in blocked the archiver, so requeue the row
+    "sheet_paused",  # db.release_setup_failure: a sheet's jobs keep failing in setup, eg a bad config or missing secret
+    "worker_paused",  # worker_supervisor: a worker's jobs keep failing quickly, so it has stopped claiming for a while
+    "writer_discarded",  # db.discard_job_writes: a result couldn't go to the sheet, as its row moved or tab went
+    "reboot_failed",  # worker_supervisor: a worker couldn't do its daily reboot
+)
+# not emailed: sheet_disagrees, raised once a day per row while a row's status and the queue disagree
 POSTMARK_URL = "https://api.postmarkapp.com/email"
 # after a failure, or with no settings, so a Postmark outage doesn't log every cycle
 RETRY_SECONDS = 300
@@ -55,7 +61,10 @@ def email_alerts(conn) -> None:
 
     for alert in alerts:
         subject = f"Auto Archiver: {alert['message'].splitlines()[0]}"[:200]
-        body = f"{alert['message']}\n\nRaised {alert['created_at']:%Y-%m-%d %H:%M} UTC, alert {alert['id']}"
+        body = (
+            f"{alert['message']}\n\nRaised {alert['created_at']:%Y-%m-%d %H:%M} UTC, alert {alert['id']} "
+            f"({alert['kind']}). See Troubleshooting in README_QUEUE.md"
+        )
         try:
             send_email(token, from_email, to, subject, body)
         except Exception as e:

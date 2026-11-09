@@ -16,6 +16,7 @@ How to install, run, deploy and operate the Postgres job queue. The design, and 
 - [Monitoring](#monitoring)
 - [Troubleshooting](#troubleshooting)
 - [Archive stats](#archive-stats)
+- [Backups](#backups)
 - [Schema migrations](#schema-migrations)
 - [Reference: timings and limits](#reference-timings-and-limits)
 
@@ -151,11 +152,13 @@ Both scripts install Python packages exactly as pinned in the committed `poetry.
 ### Coordinator
 
 ```bash
-bash scripts/job_queue/deploy-coordinator.sh                         # stop, pull, sync packages, migrate, start
+bash scripts/job_queue/deploy-coordinator.sh                         # stop, pull, sync packages, back up, migrate, start
 bash scripts/job_queue/deploy-coordinator.sh --reset-except-sheets   # the same, then empty the queue
 ```
 
 Before stopping the coordinator, it also copies the three alert email settings from your `.env` into the coordinator's `.env`, replacing any older copies. It keeps the coordinator's own `AA_DATABASE_URL`, and stops if any of the three is missing from your `.env`. It never prints their values.
+
+It backs up the database before migrating, and adds the nightly backup to the coordinator's crontab if it isn't there. See [Backups](#backups).
 
 The script stops at the first step that fails, which leaves the coordinator stopped.
 
@@ -259,7 +262,7 @@ $Q "SELECT name, beat_at FROM heartbeats"
 $Q "SELECT kind, message, created_at FROM admin_alerts ORDER BY id DESC LIMIT 20"
 ```
 
-Only `site_blocked` alerts are emailed (see [Configuration](#configuration)), so check `admin_alerts` regularly for the rest.
+These alerts are emailed (see [Configuration](#configuration)): `site_blocked`, `sheet_paused`, `worker_paused`, `writer_discarded` and `reboot_failed`. They're listed in `EMAIL_KINDS` in `job_queue/alerts.py`. `sheet_disagrees` is raised once a day per row for as long as the disagreement lasts, so it isn't emailed. Check `admin_alerts` for it now and then. Each email ends with the alert's kind; [Troubleshooting](#troubleshooting) says what to do for each one.
 
 A `site_blocked` alert means a site in `EMAIL_WHEN_BLOCKED` (in `queue_feeder_db.py`, currently `idf.il`) blocked the crawler, and the status asks for a requeue (`... (blocked by site - please requeue)`). These blocks usually lift within hours, so clear the row's status to archive it again. The coordinator emails each one once, with the sheet, row, URL and status, then sets its `sent_at`. If Postmark fails, it tries again 5 minutes later.
 
@@ -285,6 +288,10 @@ The coordinator's log is the best single view of the system. It records each job
 **A worker has stopped claiming jobs.** If a worker has 3 quick failures in a row across different sheets, it stops claiming for 15 minutes and raises an alert, so that a broken VM can't empty the queue.
 
 **A Vimeo job produced no video.** If a `vimeo.com` job finishes as `wacz: success`, the coordinator logs a warning: `Job <id> got no video from vimeo.com, only a WACZ of the page`. The sheet shows success, but Cloudflare is probably challenging the workers' IP address. Open a Vimeo video in a browser on the same network, pass the "Verify you are human" check, then clear the row's status so it runs again.
+
+**A `writer_discarded` alert.** A job's result never reached the sheet, because its row's URL changed or its tab was deleted. See [Monitoring](#monitoring).
+
+**A `reboot_failed` alert.** The worker couldn't run `sudo -n /sbin/reboot`. It carries on archiving and doesn't try again until the supervisor restarts. Check `/etc/sudoers.d/aa-reboot` on the worker (`install-worker.sh` writes it), then restart the supervisor or reboot the VM by hand.
 
 **A row says `Queued` or `Archive in progress` but has no job.** Sync raises a `sheet_disagrees` alert, at most once a day per row. Usually the row was edited by hand, or the queue was reset. Clear the status to rerun the row.
 
@@ -329,6 +336,22 @@ $Q "SELECT s.client, count(DISTINCT j.id) AS archives, pg_size_pretty(sum(f.byte
     FROM job_files f JOIN jobs j ON j.id = f.job_id JOIN sheets s ON s.id = j.sheet_id GROUP BY s.client"
 ```
 
+## Backups
+
+`scripts/job_queue/backup-db.sh` dumps the queue database on the coordinator to `~/backups/auto_archiver_<weekday>.dump` (e.g. `auto_archiver_Mon.dump`), so there are always the last 7 days. It runs nightly at 02:30 UTC from cron, and before each deploy migrates. Each run appends a line to `~/backups/backup.log`. It reads `AA_DATABASE_URL` from the repo's `.env`.
+
+The backups are on the coordinator VM itself, so they cover mistakes, a bad migration or a reset, but not losing the VM.
+
+To back up by hand, on the coordinator: `bash scripts/job_queue/backup-db.sh`
+
+To restore one over the current database, stop the coordinator and the workers' supervisors first, then on the coordinator:
+
+```bash
+sudo systemctl stop aa-coordinator
+pg_restore --clean --if-exists --no-owner -d "<AA_DATABASE_URL>" ~/backups/auto_archiver_<weekday>.dump
+sudo systemctl start aa-coordinator
+```
+
 ## Schema migrations
 
 Migrations are plain SQL files in `src/auto_archiver/job_queue/migrations/`, applied in filename order, each in its own transaction. To change the schema, add the next numbered file (e.g. `007_add_something.sql`) and run:
@@ -348,7 +371,7 @@ Never edit a file that has already been applied: its checksum is recorded. The c
 | Setting | Value | Defined in |
 |---|---|---|
 | Coordinator cycle (writer, cleanup) | 5 s | `coordinator.py` `CYCLE_SECONDS` |
-| Sheet sync interval | 15 s (testing value; planned to go back to 60 s before busy sheets move) | `coordinator.py` `SYNC_SECONDS` |
+| Sheet sync interval | 15 s | `coordinator.py` `SYNC_SECONDS` |
 | Worker tick and heartbeat | 2 s | `worker_supervisor.py` `TICK_SECONDS` |
 | Worker reported as quiet after | 30 s without a heartbeat | `coordinator.py` `WORKER_QUIET_SECONDS` |
 | Lease length, and how often it's renewed | 5 min, renewed every 60 s | `db.py` `claim_job`, `worker_supervisor.py` `RENEW_SECONDS` |

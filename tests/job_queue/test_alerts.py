@@ -37,11 +37,20 @@ def test_emails_a_site_blocked_alert_and_marks_it_sent(conn, settings, send):
     assert unsent(conn) == []
 
 
-def test_other_kinds_are_left_for_the_digest(conn, settings, send):
-    db.add_alert(conn, "sheet_paused", "Sheet 1 paused")
+@pytest.mark.parametrize("kind", ["sheet_paused", "worker_paused", "writer_discarded", "reboot_failed"])
+def test_the_other_urgent_kinds_are_emailed(conn, settings, send, kind):
+    db.add_alert(conn, kind, "Something to act on")
+    alerts.email_alerts(conn)
+    assert send.call_args.args[3] == "Auto Archiver: Something to act on"
+    assert f"({kind}). See Troubleshooting in README_QUEUE.md" in send.call_args.args[4]
+    assert unsent(conn) == []
+
+
+def test_sheet_disagrees_is_left_for_the_digest(conn, settings, send):
+    db.add_alert(conn, "sheet_disagrees", "Sheet 1 row 2: Row says Queued but has no active job")
     alerts.email_alerts(conn)
     send.assert_not_called()
-    assert unsent(conn) == ["sheet_paused"]
+    assert unsent(conn) == ["sheet_disagrees"]
 
 
 def test_without_settings_nothing_is_sent_and_it_waits(conn, send, caplog):
