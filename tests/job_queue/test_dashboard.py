@@ -1,6 +1,7 @@
 """The console dashboard. Checks what it shows and colours, not the exact layout. The fixtures are in conftest.py"""
 
 import os
+import re
 import time
 
 import pytest
@@ -91,7 +92,10 @@ def test_sheets_show_counts_and_state(conn):
     conn.execute("UPDATE sheets SET paused_until = now() + interval '10 minutes' WHERE id = %s", (paused,))
     add_job(conn, on, 2, "site1.com")
     lines = dashboard.sheets(conn)
-    assert len(lines) == 4
+    assert len(lines) == 5
+    # the headings line up over the numbers
+    heading, first = (re.sub(r"\033\[\d+m", "", line) for line in lines[1:3])
+    assert heading.index("queued") + len("queued") == first.index("     1 ") + len("     1")
     assert any("    1 " in line and f"{GREEN}on" in line for line in lines)
     assert any(f"{RED}paused until" in line for line in lines)
     assert any("off" in line for line in lines)

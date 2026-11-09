@@ -113,7 +113,10 @@ def workers(conn) -> list[str]:
 
 
 def sheets(conn) -> list[str]:
-    lines = [colour(BOLD, "Sheets") + colour(DIM, "   queued, running, and in the last 24h done, failed")]
+    lines = [
+        colour(BOLD, "Sheets") + colour(DIM, "   done and failed are for the last 24h"),
+        colour(DIM, f"  {'':<40} {'queued':>6} {'running':>7} {'done':>6} {'failed':>6}"),
+    ]
     rows = conn.execute(
         """
         SELECT s.spreadsheet_name, s.worksheet, s.enabled, s.paused_until > now() AS paused, s.paused_until,
@@ -133,9 +136,9 @@ def sheets(conn) -> list[str]:
         else:
             state = colour(DIM, "off")
         name = db.describe_tab(row["spreadsheet_name"], row["worksheet"])
-        done = colour(GREEN, str(row["done"]).rjust(5))
-        failed = colour(YELLOW if row["failed"] else GREEN, str(row["failed"]).rjust(4))
-        lines.append(f"  {name:<40} {row['queued']:>5} {row['running']:>3} {done} {failed}   {state}")
+        done = colour(GREEN, str(row["done"]).rjust(6))
+        failed = colour(YELLOW if row["failed"] else GREEN, str(row["failed"]).rjust(6))
+        lines.append(f"  {name:<40} {row['queued']:>6} {row['running']:>7} {done} {failed}   {state}")
     return lines
 
 
