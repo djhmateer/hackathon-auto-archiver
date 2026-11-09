@@ -240,3 +240,12 @@ def test_tabs_with_the_same_id_in_different_spreadsheets_are_each_logged_once(co
     assert caplog.text.count("Sheet 'First' tab Tab 1 (live)") == 1
     assert caplog.text.count("Sheet 'Second' tab Tab 1 (live)") == 1
     assert caplog.text.count("reading the") == 2
+
+
+def test_saves_what_it_read_for_the_dashboard(conn, config):
+    sheet = FakeSpreadsheet([tab_of(row("https://example.com/1"), row("https://example.com/2", status="done"))])
+    setup_sheet(conn, sheet)
+    run(conn, sheet)
+    tab = conn.execute("SELECT url_rows, blank_rows, last_read_at FROM sheets").fetchone()
+    assert (tab["url_rows"], tab["blank_rows"]) == (2, 1)
+    assert tab["last_read_at"] is not None

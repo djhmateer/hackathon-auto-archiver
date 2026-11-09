@@ -329,6 +329,7 @@ def sync_cycle(conn, opener=open_spreadsheet) -> None:
                 title, name = sheet["worksheet"], settings["sheet"] or spreadsheet.title
                 blank = sum(row.status in ("", None) for row in rows)
                 live_tab(conn, sheet["id"], rows, snapshot_at, name, title, settings)
+                db.save_tab_read(conn, sheet["id"], len(rows), blank)
                 log_on_change(
                     (spreadsheet_id, gid),
                     f"{db.describe_tab(spreadsheet.title, title)} (live): {len(rows)} row(s) with a URL, "

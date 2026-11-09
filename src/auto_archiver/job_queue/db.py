@@ -155,6 +155,14 @@ def save_tab(
     )
 
 
+def save_tab_read(conn: psycopg.Connection, sheet_id: int, url_rows: int, blank_rows: int) -> None:
+    """What sync found in the tab just now, for the dashboard"""
+    conn.execute(
+        "UPDATE sheets SET last_read_at = now(), url_rows = %s, blank_rows = %s WHERE id = %s",
+        (url_rows, blank_rows, sheet_id),
+    )
+
+
 def enable_spreadsheet(conn: psycopg.Connection, spreadsheet_id: str) -> int:
     """Moves all of a spreadsheet's tabs to the queue. Returns how many tabs it has"""
     return conn.execute("UPDATE sheets SET enabled = true WHERE spreadsheet_id = %s", (spreadsheet_id,)).rowcount

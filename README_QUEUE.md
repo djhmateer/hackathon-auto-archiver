@@ -252,7 +252,7 @@ Each run turns the spreadsheet's tabs off and cancels any queued jobs, which cle
 
 ## Monitoring
 
-On the coordinator, `d` (or `poetry run python -m auto_archiver.job_queue.dashboard` from the repo) shows a dashboard that refreshes every 5 seconds until Ctrl+C. It only reads the database. It shows the coordinator's heartbeat, queue totals and the last backup; each worker's heartbeat, running job and today's done and failed counts; each tab's queued, running, and last 24 hours' done and failed; queued jobs that can't be claimed yet and why; the last 10 finished jobs with their sheet status; and unsent and recent alerts. Green is fine, yellow is worth a look, red needs action.
+On the coordinator, `d` (or `poetry run python -m auto_archiver.job_queue.dashboard` from the repo) shows a dashboard that refreshes every 5 seconds until Ctrl+C. It only reads the database. It shows the coordinator's heartbeat, queue totals and the last backup; each worker's heartbeat, running job and today's done and failed counts; each tab's queued, running, and last 24 hours' done and failed, with its rows, blank statuses and when sync last read it (red if a tab that's on hasn't been read for a minute); queued jobs that can't be claimed yet and why; the last 10 finished jobs with their sheet status; and unsent and recent alerts. Green is fine, yellow is worth a look, red needs action.
 
 For anything else, query the database:
 

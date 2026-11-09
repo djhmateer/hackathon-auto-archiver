@@ -18,6 +18,7 @@ REFRESH_SECONDS = 5
 BACKUP_DIR = Path.home() / "backups"
 BACKUP_LATE_SECONDS = 26 * 60 * 60  # nightly, plus some slack
 RECENT_JOBS = 10
+READ_LATE_SECONDS = 60  # sync reads every tab that's on every 15s
 
 RED, YELLOW, GREEN, DIM, BOLD, RESET = "\033[31m", "\033[33m", "\033[32m", "\033[2m", "\033[1m", "\033[0m"
 CLEAR_SCREEN = "\033[H\033[2J"
@@ -114,12 +115,18 @@ def workers(conn) -> list[str]:
 
 def sheets(conn) -> list[str]:
     lines = [
-        colour(BOLD, "Sheets") + colour(DIM, "   done and failed are for the last 24h"),
-        colour(DIM, f"  {'':<40} {'queued':>6} {'running':>7} {'done':>6} {'failed':>6}"),
+        colour(BOLD, "Sheets")
+        + colour(DIM, "   done and failed are for the last 24h; rows have a URL, blank of them have no status"),
+        colour(
+            DIM,
+            f"  {'':<40} {'queued':>6} {'running':>7} {'done':>6} {'failed':>6} {'rows':>6} {'blank':>6}"
+            f"   {'last read':<9}",
+        ),
     ]
     rows = conn.execute(
         """
         SELECT s.spreadsheet_name, s.worksheet, s.enabled, s.paused_until > now() AS paused, s.paused_until,
+            s.url_rows, s.blank_rows, extract(epoch FROM now() - s.last_read_at)::int AS read_seconds_ago,
             count(j.id) FILTER (WHERE j.status = 'queued') AS queued,
             count(j.id) FILTER (WHERE j.status = 'running') AS running,
             count(j.id) FILTER (WHERE j.status = 'done' AND j.finished_at > now() - interval '1 day') AS done,
@@ -138,7 +145,22 @@ def sheets(conn) -> list[str]:
         name = db.describe_tab(row["spreadsheet_name"], row["worksheet"])
         done = colour(GREEN, str(row["done"]).rjust(6))
         failed = colour(YELLOW if row["failed"] else GREEN, str(row["failed"]).rjust(6))
-        lines.append(f"  {name:<40} {row['queued']:>6} {row['running']:>7} {done} {failed}   {state}")
+        url_rows = "" if row["url_rows"] is None else row["url_rows"]
+        blank_rows = "" if row["blank_rows"] is None else row["blank_rows"]
+        seconds = row["read_seconds_ago"]
+        read = "never" if seconds is None else f"{ago(seconds)} ago"
+        # a tab that's off isn't read, so only an enabled one can be late
+        if not row["enabled"]:
+            read_colour = DIM
+        elif seconds is None or seconds > READ_LATE_SECONDS:
+            read_colour = RED
+        else:
+            read_colour = GREEN
+        read = colour(read_colour, read.ljust(9))
+        lines.append(
+            f"  {name:<40} {row['queued']:>6} {row['running']:>7} {done} {failed} {url_rows:>6} {blank_rows:>6}"
+            f"   {read} {state}"
+        )
     return lines
 
 

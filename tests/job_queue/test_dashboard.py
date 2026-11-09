@@ -142,3 +142,18 @@ def test_backup_is_green_when_recent_and_red_when_old(conn, backup_dir):
 )
 def test_ago(seconds, text):
     assert dashboard.ago(seconds) == text
+
+
+def test_sheets_show_what_sync_last_read(conn):
+    read = add_sheet(conn, gid=1)
+    add_sheet(conn, gid=2)  # on, but never read
+    late = add_sheet(conn, gid=3)
+    add_sheet(conn, gid=4, enabled=False)
+    db.save_tab_read(conn, read, 5907, 3)
+    db.save_tab_read(conn, late, 10, 0)
+    conn.execute("UPDATE sheets SET last_read_at = now() - interval '5 minutes' WHERE id = %s", (late,))
+    lines = dashboard.sheets(conn)[2:]
+    assert "  5907      3   " + GREEN + "0s ago" in lines[0]
+    assert RED + "never" in lines[1]
+    assert RED + "5m ago" in lines[2]
+    assert dashboard.DIM + "never" in lines[3]
