@@ -18,6 +18,7 @@ from auto_archiver.job_queue import db
 from auto_archiver.modules.gsheet_feeder_db.gsheet_feeder_db import build_result_cells
 from auto_archiver.utils.custom_logger import logger
 from auto_archiver.utils.misc import calculate_file_hash
+from auto_archiver.utils.url import sheet_url_hostname, site_for_hostname
 
 # the hash enricher's algorithms, so a file it missed gets the same one
 HASH_ALGORITHMS = {"SHA-256": hashlib.sha256, "SHA3-512": hashlib.sha3_512}
@@ -26,6 +27,8 @@ EXTRA_MIMETYPES = {".wacz": "application/wacz"}
 
 # about 5 minutes, long enough for a Postgres restart
 RETRY_DELAYS_SECONDS = (5, 15, 30, 60, 60, 60, 60)
+# sites whose "please requeue" blocks are emailed (see job_queue/alerts.py), as a requeue usually gets through
+EMAIL_WHEN_BLOCKED = {"idf.il"}
 
 
 def describe_result(item: Metadata, cells: dict, cached: bool) -> dict:
@@ -100,6 +103,7 @@ class QueueFeederDB(Feeder, Database):
             logger.warning(f"Job {self.job_id} is no longer ours, not archiving it")
             return
 
+        self.job = job
         self.row_description = f"row {job['row_number']} on {job['spreadsheet_id']} : {job['worksheet']}"
         item = Metadata().set_url(job["url"])
         if job["folder"]:
@@ -144,3 +148,19 @@ class QueueFeederDB(Feeder, Database):
             logger.error(f"Couldn't work out the archive's stats, saving the result without them: {e}")
             result, files = None, ()
         self._finish("done", cells, result=result, files=files)
+        self._alert_if_blocked(cells["status"])
+
+    def _alert_if_blocked(self, status: str) -> None:
+        """
+        DM 9th Nov 26 - an alert, which the coordinator emails, when a site in EMAIL_WHEN_BLOCKED blocked the archiver
+        and the crawler asked for a requeue, as idf.il's blocks usually lift within hours
+        """
+        site = site_for_hostname(sheet_url_hostname(self.job["url"]))
+        if site not in EMAIL_WHEN_BLOCKED or "please requeue" not in status:
+            return
+        tab = db.describe_tab(self.job["spreadsheet_name"], self.job["worksheet"])
+        message = (
+            f"{site} blocked {tab} row {self.job['row_number']}. Clear the row's status to archive it again\n\n"
+            f"URL: {self.job['url']}\nStatus: {status}"
+        )
+        self._with_database(lambda conn: db.add_alert(conn, "site_blocked", message))

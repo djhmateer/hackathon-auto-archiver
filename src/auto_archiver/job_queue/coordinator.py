@@ -1,5 +1,5 @@
 """
-Coordinator: runs the sheet sync, sheet writer and cleanup in turn, on one thread. See queue-spec.md
+Coordinator: runs the sheet sync, sheet writer, cleanup and alert emails in turn, on one thread. See queue-spec.md
 
 Each step has its own try/except, and Sheets calls have timeouts, so one failing or slow step can't stop the others.
 
@@ -12,7 +12,7 @@ from dataclasses import dataclass, field
 
 import psycopg
 
-from auto_archiver.job_queue import db, migrate, sync, writer
+from auto_archiver.job_queue import alerts, db, migrate, sync, writer
 from auto_archiver.utils.custom_logger import logger
 
 # an idle writer doesn't call Google, so this only costs local SQL
@@ -129,6 +129,7 @@ def cycle(conn, sync_due: bool, watcher: Watcher = None) -> None:
         run_step("watch", lambda: watcher.watch(conn))
     run_step("writer", lambda: writer.writer_cycle(conn))
     run_step("cleanup", lambda: cleanup(conn))
+    run_step("alerts", lambda: alerts.email_alerts(conn))
     db.beat(conn, "coordinator")
 
 

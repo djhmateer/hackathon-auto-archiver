@@ -1,5 +1,6 @@
 #!/bin/bash
 # Deploys main to the coordinator VM over SSH: stop, pull, sync, migrate, start.
+# Also copies the alert email settings (POSTMARK_API_TOKEN, POSTMARK_FROM_EMAIL, ALERT_EMAIL_TO) from your .env.
 # Packages come from the committed poetry.lock: run poetry update locally, test and push, never on the VM.
 # --reset-except-sheets also empties every queue table except sheets (and schema_migrations), to start again.
 #
@@ -39,6 +40,24 @@ for CONFIG_PORT in 340 341 342; do
     echo "== Copying $CONFIGS to $HOST port $CONFIG_PORT"
     scp -q -P "$CONFIG_PORT" $CONFIGS "$HOST:/home/dave/auto-archiver/secrets/"
 done
+
+# DM 9th Nov 26 - the alert email settings from your .env, but not the whole file, as its AA_DATABASE_URL is your local
+# database. They go on stdin, so they're never on a command line or in the output
+for KEY in POSTMARK_API_TOKEN POSTMARK_FROM_EMAIL ALERT_EMAIL_TO; do
+    if ! grep -q "^$KEY=." .env 2>/dev/null; then
+        echo "No $KEY in your .env, which the coordinator needs to email alerts" >&2
+        exit 1
+    fi
+done
+echo "== Copying the alert email settings from .env to $HOST port $PORT"
+# on the coordinator: keep its AA_DATABASE_URL and anything else, and replace any old copies of the three settings
+grep -E "^(POSTMARK_API_TOKEN|POSTMARK_FROM_EMAIL|ALERT_EMAIL_TO)=" .env | ssh -p "$PORT" "$HOST" 'set -euo pipefail
+cd /home/dave/auto-archiver
+grep -q "^AA_DATABASE_URL=" .env
+{ grep -vE "^(POSTMARK_API_TOKEN|POSTMARK_FROM_EMAIL|ALERT_EMAIL_TO)=" .env || true; cat; } > .env.new
+chmod 600 .env.new
+mv .env.new .env
+echo "   its .env now has: $(grep -oE "^[A-Z_]+" .env | tr "\n" " ")"'
 
 ssh -p "$PORT" "$HOST" RESET=$RESET bash -s <<'REMOTE'
 set -euo pipefail

@@ -24,7 +24,7 @@ How to install, run, deploy and operate the Postgres job queue. The design, and 
 | Component | Where it runs | What it does |
 |---|---|---|
 | Postgres | Coordinator VM | Holds the queue: `sheets`, `jobs`, `sheet_writes`, `job_files`, `admin_alerts`, `heartbeats`, `drive_folders` |
-| Coordinator (`aa-coordinator`) | Coordinator VM, one only | Runs three steps in a loop on one thread. **Sync** reads the sheets and queues rows. The **sheet writer** writes statuses and results back to the sheets. **Cleanup** requeues jobs whose worker has died. |
+| Coordinator (`aa-coordinator`) | Coordinator VM, one only | Runs four steps in a loop on one thread. **Sync** reads the sheets and queues rows. The **sheet writer** writes statuses and results back to the sheets. **Cleanup** requeues jobs whose worker has died. **Alerts** emails the alerts that need acting on. |
 | Worker supervisor (`aa-worker-supervisor`) | Each worker VM | Claims one job at a time and runs the archiver for it as a child process. It renews the job's lease and enforces the time limit. |
 
 A row moves through the queue like this:
@@ -43,6 +43,14 @@ The database connection string is read from a `.env` file in the repo root, whic
 
 ```
 AA_DATABASE_URL=postgresql://<user>:<password>@<host>:5432/auto_archiver
+```
+
+On the coordinator, the same file also holds the Postmark settings for alert emails. Put them in your own `.env`, and `deploy-coordinator.sh` copies them across. Until they're set, the coordinator logs a warning every 5 minutes while an alert is waiting to be emailed:
+
+```
+POSTMARK_API_TOKEN=<server token>
+POSTMARK_FROM_EMAIL=<an address with a Postmark sender signature>
+ALERT_EMAIL_TO=<where alerts go>
 ```
 
 The install scripts create this file. Sheet configs (`secrets/orchestration-*.yaml`), service accounts, cookies and sessions are not in git and must be copied to each VM.
@@ -147,6 +155,8 @@ bash scripts/job_queue/deploy-coordinator.sh                         # stop, pul
 bash scripts/job_queue/deploy-coordinator.sh --reset-except-sheets   # the same, then empty the queue
 ```
 
+Before stopping the coordinator, it also copies the three alert email settings from your `.env` into the coordinator's `.env`, replacing any older copies. It keeps the coordinator's own `AA_DATABASE_URL`, and stops if any of the three is missing from your `.env`. It never prints their values.
+
 The script stops at the first step that fails, which leaves the coordinator stopped.
 
 `--reset-except-sheets` runs after the migrations. It empties `job_files`, `sheet_writes`, `jobs`, `drive_folders`, `admin_alerts` and `heartbeats` and restarts their ids from 1. It keeps `sheets` (including whether each tab is enabled) and `schema_migrations`. Before you use it:
@@ -249,7 +259,9 @@ $Q "SELECT name, beat_at FROM heartbeats"
 $Q "SELECT kind, message, created_at FROM admin_alerts ORDER BY id DESC LIMIT 20"
 ```
 
-Alerts are not emailed yet, so check `admin_alerts` regularly.
+Only `site_blocked` alerts are emailed (see [Configuration](#configuration)), so check `admin_alerts` regularly for the rest.
+
+A `site_blocked` alert means a site in `EMAIL_WHEN_BLOCKED` (in `queue_feeder_db.py`, currently `idf.il`) blocked the crawler, and the status asks for a requeue (`... (blocked by site - please requeue)`). These blocks usually lift within hours, so clear the row's status to archive it again. The coordinator emails each one once, with the sheet, row, URL and status, then sets its `sent_at`. If Postmark fails, it tries again 5 minutes later.
 
 A `writer_discarded` alert means a job's result never reached the sheet, because its row's URL changed or its tab was deleted. The result is still in the `jobs` table. If the URL moved to another row, that row shows `Archive in progress` with no job and raises a `sheet_disagrees` alert. Clear its status to archive it again.
 

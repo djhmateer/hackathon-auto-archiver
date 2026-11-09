@@ -25,7 +25,7 @@ def module(conn, monkeypatch, database_url):
     return feeder
 
 
-def add_claimed_job(conn, module, folder=""):
+def add_claimed_job(conn, module, folder="", url=URL):
     sheet = conn.execute(
         """
         INSERT INTO sheets (spreadsheet_id, worksheet_gid, worksheet, config, enabled)
@@ -33,7 +33,7 @@ def add_claimed_job(conn, module, folder=""):
         """,
         (CONFIG,),
     ).fetchone()["id"]
-    job_id = db.add_job(conn, sheet, 2, URL, "example.com", folder)
+    job_id = db.add_job(conn, sheet, 2, url, "example.com", folder)
     conn.execute("UPDATE jobs SET available_at = now() - interval '1 minute' WHERE id = %s", (job_id,))
     job = db.claim_job(conn, "vm1")
     module.job_id, module.lease_token = job_id, str(job["lease_token"])
@@ -80,6 +80,40 @@ def test_done_saves_the_result_cells(conn, module, caplog):
     cells = conn.execute("SELECT cells FROM sheet_writes ORDER BY id DESC LIMIT 1").fetchone()["cells"]
     assert cells["status"] == "my-archiver: success"
     assert cells["title"] == "A title"
+
+
+def finish_blocked(conn, module, url, note):
+    add_claimed_job(conn, module, url=url)
+    list(module)
+    item = Metadata().set_url(url)
+    item.status = "no archiver"
+    item.add_status_note(note)
+    module.done(item)
+    return conn.execute("SELECT kind, message FROM admin_alerts").fetchall()
+
+
+@pytest.mark.parametrize("url", ["https://www.idf.il/123456", "https://idf.il/123456"])
+def test_a_block_asking_for_a_requeue_on_idf_il_raises_an_alert(conn, module, url):
+    alerts = finish_blocked(conn, module, url, "blocked by site - please requeue")
+    assert [a["kind"] for a in alerts] == ["site_blocked"]
+    first_line, rest = alerts[0]["message"].split("\n", 1)
+    assert first_line == "idf.il blocked tab tab1 row 2. Clear the row's status to archive it again"
+    assert f"URL: {url}" in rest
+    assert "Status: no archiver (blocked by site - please requeue)" in rest
+
+
+@pytest.mark.parametrize(
+    "url, note",
+    [
+        # another site
+        (URL, "blocked by site - please requeue"),
+        # a block that a requeue won't get past
+        ("https://www.idf.il/123456", "blocked by site - HTTP 403"),
+        ("https://www.idf.il/123456", "screenshot blocked by site"),
+    ],
+)
+def test_no_alert_for_other_sites_or_blocks(conn, module, url, note):
+    assert finish_blocked(conn, module, url, note) == []
 
 
 def test_done_saves_the_stats_and_each_file(conn, module, tmp_path):

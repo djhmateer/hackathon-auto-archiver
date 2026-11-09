@@ -35,12 +35,19 @@ MAX_ATTEMPTS = 3
 MAX_SETUP_FAILURES = 3
 
 
-def database_url(env_file: Path = ENV_FILE) -> str:
-    """The AA_DATABASE_URL line of the .env file"""
+def env_value(name: str, env_file: Path = ENV_FILE) -> str | None:
+    """The value of a NAME=value line of the .env file, or None if there isn't one"""
     if env_file.exists():
         for line in env_file.read_text().splitlines():
-            if line.startswith("AA_DATABASE_URL="):
+            if line.startswith(f"{name}="):
                 return line.split("=", 1)[1].strip().strip("'\"")
+    return None
+
+
+def database_url(env_file: Path = ENV_FILE) -> str:
+    """The AA_DATABASE_URL line of the .env file"""
+    if (url := env_value("AA_DATABASE_URL", env_file)) is not None:
+        return url
     raise RuntimeError(f"No database set: add AA_DATABASE_URL=<connection string> to {env_file.absolute()}")
 
 
@@ -90,6 +97,16 @@ def add_alert_once(conn: psycopg.Connection, kind: str, message: str) -> None:
         """,
         {"kind": kind, "message": message},
     )
+
+
+def get_unsent_alerts(conn: psycopg.Connection, kinds: tuple) -> list[dict]:
+    return conn.execute(
+        "SELECT * FROM admin_alerts WHERE sent_at IS NULL AND kind = ANY(%s) ORDER BY id", (list(kinds),)
+    ).fetchall()
+
+
+def mark_alert_sent(conn: psycopg.Connection, alert_id: int) -> None:
+    conn.execute("UPDATE admin_alerts SET sent_at = now() WHERE id = %s", (alert_id,))
 
 
 def now(conn: psycopg.Connection):
