@@ -73,6 +73,7 @@ class Action:
 
 
 # what was last logged for each key, so a line that's the same every cycle is only logged when it changes
+# the last message logged for each key, eg (spreadsheet id, tab id)
 _last_logged = {}
 
 
@@ -218,8 +219,9 @@ def read_tabs(spreadsheet, tabs: list, settings: dict) -> dict[int, list[Row]]:
             continue
         found = [f"'{columns[col]}'" for col in positions]
         missing = [f"'{columns[col]}'" for col in OPTIONAL_COLUMNS if col in columns and col not in positions]
+        # with the spreadsheet, as tab ids repeat across spreadsheets (the first tab is always 0)
         log_on_change(
-            (tab.id, "columns"),
+            (spreadsheet.id, tab.id, "columns"),
             f"{db.describe_tab(spreadsheet.title, tab.title)}: reading the {', '.join(found)} columns"
             + (f", there's no {', '.join(missing)} column" if missing else ""),
         )
@@ -328,7 +330,7 @@ def sync_cycle(conn, opener=open_spreadsheet) -> None:
                 blank = sum(row.status in ("", None) for row in rows)
                 live_tab(conn, sheet["id"], rows, snapshot_at, name, title, settings)
                 log_on_change(
-                    gid,
+                    (spreadsheet_id, gid),
                     f"{db.describe_tab(spreadsheet.title, title)} (live): {len(rows)} row(s) with a URL, "
                     f"{blank} blank status",
                 )

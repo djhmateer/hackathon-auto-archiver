@@ -74,6 +74,10 @@ alias_line="alias j='journalctl -u aa-coordinator -f'"
 touch "$HOME/.bash_aliases"
 grep -qxF "$alias_line" "$HOME/.bash_aliases" || echo "$alias_line" >> "$HOME/.bash_aliases"
 
+echo "=== Alias: d shows the queue dashboard"
+alias_line="alias d='cd $REPO && poetry run python -m auto_archiver.job_queue.dashboard'"
+grep -qxF "$alias_line" "$HOME/.bash_aliases" || echo "$alias_line" >> "$HOME/.bash_aliases"
+
 cat <<DONE
 
 Done. Still to do by hand:

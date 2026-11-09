@@ -222,3 +222,21 @@ def test_tab_summary_is_only_logged_when_it_changes(conn, config, caplog):
     tab.rows.append(row("https://example.com/2"))
     run(conn, sheet)
     assert "Sheet 'Example Sheet' tab Tab 1 (live): 2 row(s) with a URL" in caplog.text
+
+
+def test_tabs_with_the_same_id_in_different_spreadsheets_are_each_logged_once(conn, config, caplog):
+    # the first tab of every spreadsheet has id 0, so the logging has to tell them apart by spreadsheet too
+    first = FakeSpreadsheet([tab_of(row("https://example.com/1"), gid=0)], spreadsheet_id="first", title="First")
+    second = FakeSpreadsheet([tab_of(row("https://example.com/2"), gid=0)], spreadsheet_id="second", title="Second")
+    for sheet in (first, second):
+        setup_sheet(conn, sheet)
+    spreadsheets = {"first": first, "second": second}
+
+    def opener(settings, spreadsheet_id=None):
+        return spreadsheets[spreadsheet_id]
+
+    sync.sync_cycle(conn, opener)
+    sync.sync_cycle(conn, opener)
+    assert caplog.text.count("Sheet 'First' tab Tab 1 (live)") == 1
+    assert caplog.text.count("Sheet 'Second' tab Tab 1 (live)") == 1
+    assert caplog.text.count("reading the") == 2

@@ -67,7 +67,7 @@ def _write_tab(conn, tab, entries: list[dict], settings: dict, read_ranges, spre
     if "url" not in positions or "status" not in positions:
         # probably a header being renamed, so the entries wait and are tried again next cycle
         log_on_change(
-            (tab.id, "writer columns"),
+            (spreadsheet_name, tab.id, "writer columns"),
             f"{describe_tab(spreadsheet_name, tab.title)}: not writing, as the tab has no url or status column",
         )
         return 0
