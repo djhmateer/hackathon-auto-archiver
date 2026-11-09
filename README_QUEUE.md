@@ -183,9 +183,11 @@ sudo systemctl restart aa-coordinator
 bash scripts/job_queue/deploy-workers.sh
 ```
 
-The script runs the same checks, then updates one worker at a time, so only one is down at once. **It kills running jobs rather than waiting for them.** Each killed job is retried within about 9 minutes: the lease expires after 5, cleanup requeues it 2 minutes after that, and the job becomes claimable 2 minutes later.
+The script runs the same checks, then **stops every worker first, killing its running job** rather than waiting for it. Then it deploys one worker at a time and starts it. After the package sync, each worker puts its killed job back on the queue (`worker_supervisor --release`): the crawl container and the job's files are removed, the attempt is given back, and the job can be claimed at once. A killed job is retried as soon as a worker is back up, and only on one that's already deployed, as the others are still stopped. All the workers are down for the deploy, a few minutes.
 
-On each worker, after syncing the packages, it also updates the Docker images:
+The released job's row keeps its `Archive in progress (<worker>)` status until the job finishes, even if another worker picks it up. If the script fails after stopping a worker but before releasing its job, the job comes back the slow way: after its lease expires (5 minutes), cleanup requeues it 2 minutes later, and that uses up one of its attempts.
+
+On each worker, after releasing the job, it also updates the Docker images:
 
 - pulls `webrecorder/browsertrix-crawler:latest`, which the code runs untagged;
 - pulls the `brainicism/bgutil-ytdlp-pot-provider` image whose tag matches the installed `bgutil-ytdlp-pot-provider` plugin (from `poetry.lock`), because the YouTube token server and the plugin must be the same version;

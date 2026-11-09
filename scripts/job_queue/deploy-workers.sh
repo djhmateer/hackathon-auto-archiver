@@ -1,6 +1,7 @@
 #!/bin/bash
-# Deploys main to each worker VM over SSH, one at a time: kill the running job, stop, pull, sync, update the docker
-# images and restart bgutil-provider, start.
+# Deploys main to the worker VMs over SSH. First stops every worker, killing its running job. Then, one worker at a
+# time: pull, sync, put its killed job back on the queue (without using up an attempt), update the docker images and
+# restart bgutil-provider, start. A killed job is retried as soon as a worker is back, and only on a deployed one.
 # Packages come from the committed poetry.lock: run poetry update locally, test and push, never on the VMs.
 # Deploy the coordinator first if there's a new migration, as workers don't migrate.
 #
@@ -33,18 +34,24 @@ for CONFIG_PORT in 340 341 342; do
     scp -q -P "$CONFIG_PORT" $CONFIGS "$HOST:/home/dave/auto-archiver/secrets/"
 done
 
+# all of them first, so a job put back on the queue can't be claimed by a worker that's about to be stopped
 for PORT in $PORTS; do
-    echo "######## $HOST port $PORT"
+    echo "######## $HOST port $PORT: stopping"
+    ssh -p "$PORT" "$HOST" bash -s <<'REMOTE'
+set -euo pipefail
+echo "== $(hostname): stopping aa-worker-supervisor now, killing any running job"
+# stop after the kill, or Restart=on-failure would start it again mid-deploy
+sudo systemctl kill -s SIGKILL aa-worker-supervisor || true
+sudo systemctl stop aa-worker-supervisor
+REMOTE
+done
+
+for PORT in $PORTS; do
+    echo "######## $HOST port $PORT: deploying"
     ssh -p "$PORT" "$HOST" bash -s <<'REMOTE'
 set -euo pipefail
 export PATH="$HOME/.local/bin:$PATH"
 cd /home/dave/auto-archiver
-
-echo "== $(hostname): stopping aa-worker-supervisor now, killing any running job"
-# the killed job is retried once its lease expires, and the supervisor clears leftover containers when it starts.
-# stop after the kill, or Restart=on-failure would start it again mid-deploy
-sudo systemctl kill -s SIGKILL aa-worker-supervisor || true
-sudo systemctl stop aa-worker-supervisor
 
 echo "== Pulling main"
 git pull origin main
@@ -52,6 +59,10 @@ git log -1 --oneline
 
 echo "== Syncing packages"
 poetry sync --only main
+
+echo "== Putting its killed job back on the queue"
+# with the new code. Removes the job's crawl container and files too, and gives back the attempt
+poetry run python -m auto_archiver.job_queue.worker_supervisor --release
 
 echo "== Updating docker images"
 # the code runs browsertrix-crawler untagged, ie latest

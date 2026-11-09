@@ -522,3 +522,22 @@ def test_a_heartbeat_saves_the_workers_code_and_machine(conn):
     (beat,) = db.get_worker_heartbeats(conn)
     assert beat["git_commit"] == "def5678"
     assert {column: beat[column] for column in db.STAT_COLUMNS} == stats
+
+
+def test_a_deploy_releases_only_that_workers_running_jobs_with_their_attempt_back(conn):
+    sheet_id = add_sheet(conn)
+    mine = add_job(conn, sheet_id, row=2)
+    other = add_job(conn, sheet_id, row=3)
+    db.claim_job(conn, "vm1")
+    db.claim_job(conn, "vm2")
+    released = db.release_worker_jobs(conn, "vm1")
+    assert [job["id"] for job in released] == [mine]
+    current = job(conn, mine)
+    assert (current["status"], current["attempts"], current["worker"], current["lease_token"]) == (
+        "queued",
+        0,
+        None,
+        None,
+    )
+    assert db.claim_job(conn, "vm2")["id"] == mine  # straight away, no retry delay
+    assert job(conn, other)["status"] == "running"

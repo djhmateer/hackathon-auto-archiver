@@ -694,3 +694,18 @@ def test_console_logs_older_than_the_keep_days_are_pruned(tmp_path):
     os.utime(old, (long_ago, long_ago))
     worker_supervisor.prune_console_logs(str(tmp_path))
     assert not old.exists() and new.exists()
+
+
+def test_release_clears_leftovers_and_puts_the_job_back(conn, mocker, caplog):
+    sheet_id = conn.execute(
+        "INSERT INTO sheets (spreadsheet_id, worksheet_gid, worksheet, config, enabled) "
+        "VALUES ('spreadsheet1', 1, 'tab1', 'secrets/orchestration-example.yaml', true) RETURNING id"
+    ).fetchone()["id"]
+    job_id = db.add_job(conn, sheet_id, 2, "https://example.com/post/2", "example.com")
+    conn.execute("UPDATE jobs SET available_at = now() - interval '1 minute'")
+    db.claim_job(conn, "vm1")
+    leftovers = mocker.patch.object(WorkerSupervisor, "clear_leftovers")
+    worker_supervisor.release("vm1")
+    leftovers.assert_called_once()
+    assert db.get_job(conn, job_id)["status"] == "queued"
+    assert f"Released job {job_id} (row 2, example.com) back to the queue" in caplog.text

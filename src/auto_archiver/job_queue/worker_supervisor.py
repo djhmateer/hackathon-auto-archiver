@@ -466,8 +466,29 @@ def main() -> None:
     parser.add_argument(
         "--reboot-at", type=reboot_time, help="UK time for the daily reboot, eg 05:20. No reboots if left out"
     )
+    parser.add_argument(
+        "--release",
+        action="store_true",
+        help="for a deploy, with the supervisor stopped: clear this worker's leftovers and put its jobs back on the "
+        "queue, without using up an attempt, then exit",
+    )
     args = parser.parse_args()
+    if args.release:
+        release(args.worker)
+        return
     WorkerSupervisor(args.worker, reboot_at=args.reboot_at).run()
+
+
+def release(worker: str) -> None:
+    """Run by deploy-workers.sh once the supervisor is stopped, so the job retries as soon as a worker is back"""
+    # first, so a crawl can't carry on and nothing is left from the killed job
+    WorkerSupervisor(worker).clear_leftovers()
+    with db.connect() as conn:
+        released = db.release_worker_jobs(conn, worker)
+    for job in released:
+        logger.info(f"Released job {job['id']} (row {job['row_number']}, {job['domain']}) back to the queue")
+    if not released:
+        logger.info(f"Worker {worker} had no running job")
 
 
 if __name__ == "__main__":

@@ -547,6 +547,22 @@ def finish_job(
     return True
 
 
+def release_worker_jobs(conn: psycopg.Connection, worker: str) -> list[dict]:
+    """
+    For a deploy, once the worker's supervisor and job are killed: its running jobs go straight back to the queue,
+    with their attempt given back, as the job didn't fail. Returns the jobs released
+    """
+    return conn.execute(
+        """
+        UPDATE jobs SET status = 'queued', attempts = greatest(attempts - 1, 0), available_at = now(),
+            worker = NULL, lease_token = NULL, lease_until = NULL, work_started_at = NULL
+        WHERE status = 'running' AND worker = %s
+        RETURNING id, row_number, domain
+        """,
+        (worker,),
+    ).fetchall()
+
+
 def release_setup_failure(conn: psycopg.Connection, job_id: int, lease_token: str) -> bool:
     """
     The child exited before work started, so the fault is in a config or VM rather than the row: requeue the job and
