@@ -115,7 +115,7 @@ def now(conn: psycopg.Connection):
 
 
 # what a worker sends with its heartbeat, from machine_stats() in worker_supervisor.py
-STAT_COLUMNS = ("disk_free_bytes", "mem_available_bytes", "mem_total_bytes", "swap_used_bytes")
+STAT_COLUMNS = ("cpu_percent", "disk_free_bytes", "mem_available_bytes", "mem_total_bytes", "swap_used_bytes")
 
 
 def beat(conn: psycopg.Connection, name: str, git_commit: str = None, stats: dict = None) -> None:

@@ -17,16 +17,21 @@ from auto_archiver.job_queue.worker_supervisor import TIME_LIMIT_SECONDS, git_co
 REFRESH_SECONDS = 2
 BACKUP_DIR = Path.home() / "backups"
 BACKUP_LATE_SECONDS = 26 * 60 * 60  # nightly, plus some slack
-RECENT_JOBS = 10
+RECENT_JOBS = 5
+WAITING_JOBS = 10
+TAB_WIDTH = 30
 FAILURES = 5
 SITES = 10
 READ_LATE_SECONDS = 60  # sync reads every tab that's on every 15s
 QUEUED_LONG_SECONDS = 60 * 60
+WORKER_WIDTH = 12  # eg glanworker1
+INDENT = " " * (WORKER_WIDTH + 3)  # lines under a worker's first line
 GB, MB = 1024**3, 1024**2
 DISK_LOW, DISK_VERY_LOW = 10 * GB, 5 * GB
 # of memory still available
 MEMORY_LOW, MEMORY_VERY_LOW = 0.25, 0.10
 SWAP_HIGH = GB
+CPU_HIGH = 90  # percent. A crawl uses a lot, so only yellow, and only near full
 
 RED, YELLOW, GREEN, DIM, BOLD, RESET = "\033[31m", "\033[33m", "\033[32m", "\033[2m", "\033[1m", "\033[0m"
 # redraw from the top left, clearing the rest of each line and of the screen, so the refresh doesn't flicker
@@ -52,7 +57,7 @@ def ago(seconds) -> str:
 def machine(stats: dict) -> str:
     """Disk, memory and swap, from machine_stats() or a worker's heartbeat"""
     if stats.get("disk_free_bytes") is None:
-        return colour(DIM, "disk, memory and swap ?")  # sent from the next worker deploy
+        return colour(DIM, "cpu, disk, memory and swap ?")  # sent from the next worker deploy
     free = stats["disk_free_bytes"]
     disk = colour(RED if free < DISK_VERY_LOW else YELLOW if free < DISK_LOW else GREEN, f"{free / GB:.1f} GB")
     share = stats["mem_available_bytes"] / stats["mem_total_bytes"]
@@ -62,14 +67,21 @@ def machine(stats: dict) -> str:
     )
     swap_used = stats["swap_used_bytes"]
     swap = colour(YELLOW if swap_used > SWAP_HIGH else GREEN, f"{swap_used / MB:.0f} MB")
-    return f"disk {disk} free, memory {memory} free, swap {swap} used"
+    cpu = "?" if stats.get("cpu_percent") is None else f"{stats['cpu_percent']:.0f}%"
+    cpu = colour(YELLOW if stats.get("cpu_percent") and stats["cpu_percent"] > CPU_HIGH else GREEN, cpu)
+    return f"cpu {cpu}, disk {disk} free, memory {memory} free, swap {swap} used"
+
+
+def tab(row) -> str:
+    """eg ClientA/Sheet1, shorter than db.describe_tab() to fit more on a line"""
+    return f"{row['spreadsheet_name']}/{row['worksheet']}" if row["spreadsheet_name"] else row["worksheet"]
 
 
 def heartbeat(seconds_ago: int) -> str:
     return colour(RED if seconds_ago >= WORKER_QUIET_SECONDS else GREEN, f"{ago(seconds_ago)} ago")
 
 
-def header(conn, coordinator_commit: str, coordinator_stats: dict) -> list[str]:
+def header(conn, coordinator_stats: dict) -> list[str]:
     now = db.now(conn)
     lines = [
         colour(BOLD, f"Auto Archiver queue   {now:%Y-%m-%d %H:%M:%S} UTC")
@@ -80,8 +92,7 @@ def header(conn, coordinator_commit: str, coordinator_stats: dict) -> list[str]:
         "SELECT extract(epoch FROM now() - beat_at)::int AS seconds_ago FROM heartbeats WHERE name = 'coordinator'"
     ).fetchone()
     when = colour(RED, "no heartbeat ever") if beat is None else f"heartbeat {heartbeat(beat['seconds_ago'])}"
-    lines.append(f"Coordinator: {when}, code {coordinator_commit}")
-    lines.append(f"             {machine(coordinator_stats)}")
+    lines.append(f"Coordinator: {when}, {machine(coordinator_stats)}")
 
     q = db.get_queue_summary(conn)
     lines.append(
@@ -142,18 +153,18 @@ def workers(conn, coordinator_commit: str) -> list[str]:
             # a worker that missed a deploy runs different code from the coordinator
             code = colour(GREEN if beat["git_commit"] == coordinator_commit else RED, beat["git_commit"])
         lines.append(
-            f"  {name:<10} heartbeat {heartbeat(beat['seconds_ago'])}, code {code}, "
+            f"  {name:<{WORKER_WIDTH}} heartbeat {heartbeat(beat['seconds_ago'])}, code {code}, "
             f"today {colour(GREEN, counts['done'])} done, {failed} failed"
         )
-        lines.append(f"             {machine(beat)}")
+        lines.append(f"{INDENT}{machine(beat)}")
         job = running.get(name)
         if job is None:
-            lines.append(colour(DIM, "             idle"))
+            lines.append(colour(DIM, f"{INDENT}idle"))
         else:
             seconds = (datetime.now(timezone.utc) - job["started_at"]).total_seconds()
             took = colour(RED if seconds > TIME_LIMIT_SECONDS else GREEN, ago(seconds))
             lines.append(
-                f"             job {job['id']} {db.describe_tab(job['spreadsheet_name'], job['worksheet'])} "
+                f"{INDENT}job {job['id']} {tab(job)} "
                 f"row {job['row_number']} {job['domain']}, {took}, attempt {job['attempts']}"
             )
     return lines
@@ -165,7 +176,7 @@ def sheets(conn) -> list[str]:
         + colour(DIM, "   done and failed are for the last 24h; rows have a URL, blank of them have no status"),
         colour(
             DIM,
-            f"  {'':<40} {'queued':>6} {'running':>7} {'done':>6} {'failed':>6} {'rows':>6} {'blank':>6}"
+            f"  {'':<{TAB_WIDTH}} {'queued':>6} {'running':>7} {'done':>6} {'failed':>6} {'rows':>6} {'blank':>6}"
             f"   {'last read':<9}",
         ),
     ]
@@ -188,7 +199,7 @@ def sheets(conn) -> list[str]:
             state = colour(GREEN, "on")
         else:
             state = colour(DIM, "off")
-        name = db.describe_tab(row["spreadsheet_name"], row["worksheet"])
+        name = tab(row)
         done = colour(GREEN, str(row["done"]).rjust(6))
         failed = colour(YELLOW if row["failed"] else GREEN, str(row["failed"]).rjust(6))
         url_rows = "" if row["url_rows"] is None else row["url_rows"]
@@ -204,7 +215,7 @@ def sheets(conn) -> list[str]:
             read_colour = GREEN
         read = colour(read_colour, read.ljust(9))
         lines.append(
-            f"  {name:<40} {row['queued']:>6} {row['running']:>7} {done} {failed} {url_rows:>6} {blank_rows:>6}"
+            f"  {name:<{TAB_WIDTH}} {row['queued']:>6} {row['running']:>7} {done} {failed} {url_rows:>6} {blank_rows:>6}"
             f"   {read} {state}"
         )
     return lines
@@ -282,8 +293,8 @@ def job_line(row) -> str:
     took = ago((row["finished_at"] - row["started_at"]).total_seconds()) if row["started_at"] else "?"
     result = colour(GREEN if is_ok(row) else YELLOW, (row["sheet_status"] or row["status"])[:80])
     return (
-        f"  {row['finished_at']:%H:%M} {row['worker'] or '':<9} job {row['id']} "
-        f"{db.describe_tab(row['spreadsheet_name'], row['worksheet'])} row {row['row_number']} "
+        f"  {row['finished_at']:%H:%M} {row['worker'] or '':<{WORKER_WIDTH}} job {row['id']} "
+        f"{tab(row)} row {row['row_number']} "
         f"{row['domain']}, {took}: {result}"
     )
 
@@ -321,14 +332,11 @@ def waiting(conn) -> list[str]:
     ).fetchall()
     held = [row for row in rows if row["reason"]]
     lines = [colour(BOLD, "Waiting") + colour(DIM, f"   {len(held)} queued job(s) that can't be claimed yet")]
-    for row in held[:RECENT_JOBS]:
+    for row in held[:WAITING_JOBS]:
         reason = row["reason"]
         if reason == "retry":
             reason = f"retry at {row['available_at']:%H:%M} UTC, attempt {row['attempts'] + 1}"
-        lines.append(
-            f"  job {row['id']} {db.describe_tab(row['spreadsheet_name'], row['worksheet'])} row {row['row_number']} "
-            f"{row['domain']}: {colour(YELLOW, reason)}"
-        )
+        lines.append(f"  job {row['id']} {tab(row)} row {row['row_number']} {row['domain']}: {colour(YELLOW, reason)}")
     return lines
 
 
@@ -354,7 +362,7 @@ def alerts(conn) -> list[str]:
 
 def render(conn, coordinator_commit: str = "?", coordinator_stats: dict = None) -> str:
     sections = [
-        header(conn, coordinator_commit, coordinator_stats or {}),
+        header(conn, coordinator_stats or {}),
         workers(conn, coordinator_commit),
         sheets(conn),
         waiting(conn),
@@ -372,8 +380,8 @@ def main() -> None:
         # a new connection each time, so a Postgres restart only loses one refresh
         try:
             with db.connect() as conn:
-                # the dashboard runs on the coordinator, from its repo, so these are the coordinator's.
-                # Each time, so it shows a deploy without restarting the dashboard
+                # the dashboard runs on the coordinator, from its repo, so these are the coordinator's, to compare
+                # the workers' code with. Each time, so it shows a deploy without restarting the dashboard
                 screen = render(conn, git_commit(), machine_stats("."))
         except Exception as e:
             screen = colour(RED, f"Can't read the queue database: {e}")

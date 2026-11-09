@@ -671,3 +671,14 @@ def test_machine_stats_reads_disk_memory_and_swap(tmp_path):
     assert stats["disk_free_bytes"] > 0
     assert 0 < stats["mem_available_bytes"] <= stats["mem_total_bytes"]
     assert stats["swap_used_bytes"] >= 0
+
+
+def test_cpu_percent_is_none_at_first_then_a_percentage(monkeypatch):
+    monkeypatch.setattr(worker_supervisor, "_last_cpu", None)
+    assert worker_supervisor.cpu_percent() is None
+    # a little work, so the CPU ticks move on
+    end = time.monotonic() + 0.05
+    while time.monotonic() < end:
+        pass
+    percent = worker_supervisor.cpu_percent()
+    assert percent is None or 0 <= percent <= 100

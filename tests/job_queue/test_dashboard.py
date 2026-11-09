@@ -46,7 +46,7 @@ def finish(conn, job, status, sheet_status) -> None:
 def test_an_empty_queue_renders_every_section(conn):
     screen = dashboard.render(conn)
     titles = ("Auto Archiver queue", "Workers", "Sheets", "Waiting", "Sites", "Storage", "Last 5 failed", "Alerts")
-    for title in (*titles, "Last 10 finished"):
+    for title in (*titles, "Last 5 finished"):
         assert title in screen
     assert f"{RED}no heartbeat ever" in screen
     assert f"{RED}  No worker has ever sent a heartbeat" in screen
@@ -73,7 +73,7 @@ def test_a_worker_shows_its_running_job_and_todays_counts(conn):
     running = run_job(conn, sheet_id, 4, "site3.com")
     line = "\n".join(dashboard.workers(conn, "abc1234"))
     assert f"{GREEN}1{dashboard.RESET} done, {YELLOW}1{dashboard.RESET} failed" in line
-    assert f"job {running['id']} Sheet 'Sheet A' tab tab1 row 4 site3.com" in line
+    assert f"job {running['id']} Sheet A/tab1 row 4 site3.com" in line
 
 
 def test_finished_jobs_show_the_sheet_status_and_blocks_are_yellow(conn):
@@ -132,10 +132,10 @@ def test_alerts_show_unsent_in_red_and_only_the_first_line(conn):
 def test_backup_is_green_when_recent_and_red_when_old(conn, backup_dir):
     backup = backup_dir / "auto_archiver_Mon.dump"
     backup.write_bytes(b"x")
-    assert f"Last backup: {GREEN}" in "\n".join(dashboard.header(conn, "abc1234", {}))
+    assert f"Last backup: {GREEN}" in "\n".join(dashboard.header(conn, {}))
     two_days_ago = time.time() - 2 * 24 * 60 * 60
     os.utime(backup, (two_days_ago, two_days_ago))
-    assert f"Last backup: {RED}2d 0h ago" in "\n".join(dashboard.header(conn, "abc1234", {}))
+    assert f"Last backup: {RED}2d 0h ago" in "\n".join(dashboard.header(conn, {}))
 
 
 @pytest.mark.parametrize(
@@ -161,7 +161,13 @@ def test_sheets_show_what_sync_last_read(conn):
 
 
 GB = dashboard.GB
-STATS = {"disk_free_bytes": 20 * GB, "mem_available_bytes": 2 * GB, "mem_total_bytes": 4 * GB, "swap_used_bytes": 0}
+STATS = {
+    "cpu_percent": 12.3,
+    "disk_free_bytes": 20 * GB,
+    "mem_available_bytes": 2 * GB,
+    "mem_total_bytes": 4 * GB,
+    "swap_used_bytes": 0,
+}
 
 
 def test_a_worker_shows_its_code_and_machine(conn):
@@ -174,7 +180,7 @@ def test_a_worker_shows_its_code_and_machine(conn):
     assert f"code {YELLOW}?" in screen
     assert f"disk {GREEN}20.0 GB{dashboard.RESET} free, memory {GREEN}2.0 of 4.0 GB{dashboard.RESET} free" in screen
     assert f"disk {RED}3.0 GB" in screen
-    assert "disk, memory and swap ?" in screen
+    assert "cpu, disk, memory and swap ?" in screen
 
 
 @pytest.mark.parametrize(
@@ -184,6 +190,9 @@ def test_a_worker_shows_its_code_and_machine(conn):
         ({"mem_available_bytes": GB // 2}, f"memory {YELLOW}0.5 of 4.0 GB"),
         ({"mem_available_bytes": GB // 5}, f"memory {RED}0.2 of 4.0 GB"),
         ({"swap_used_bytes": 2 * GB}, f"swap {YELLOW}2048 MB"),
+        ({"cpu_percent": 12.3}, f"cpu {GREEN}12%"),
+        ({"cpu_percent": 95.0}, f"cpu {YELLOW}95%"),
+        ({"cpu_percent": None}, f"cpu {GREEN}?"),
     ],
 )
 def test_machine_colours(stats, expected):
@@ -191,8 +200,7 @@ def test_machine_colours(stats, expected):
 
 
 def test_the_coordinators_machine_is_in_the_header(conn):
-    screen = "\n".join(dashboard.header(conn, "abc1234", STATS))
-    assert "code abc1234" in screen
+    screen = "\n".join(dashboard.header(conn, STATS))
     assert f"disk {GREEN}20.0 GB" in screen
 
 
@@ -201,7 +209,7 @@ def test_speed_counts_finished_jobs_and_the_oldest_queued(conn):
     finish(conn, run_job(conn, sheet_id, 2, "site1.com"), "done", "wacz: success")
     old = add_job(conn, sheet_id, 3, "site2.com")
     conn.execute("UPDATE jobs SET added_at = now() - interval '2 hours' WHERE id = %s", (old,))
-    screen = "\n".join(dashboard.header(conn, "abc1234", STATS))
+    screen = "\n".join(dashboard.header(conn, STATS))
     assert (
         "Speed: 1 finished in the last hour, 1 in the last 24h, oldest queued job added " + YELLOW + "2h 0m" in screen
     )

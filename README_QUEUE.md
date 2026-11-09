@@ -254,13 +254,13 @@ Each run turns the spreadsheet's tabs off and cancels any queued jobs, which cle
 
 On the coordinator, `d` (or `poetry run python -m auto_archiver.job_queue.dashboard` from the repo) shows a dashboard that refreshes every 2 seconds until Ctrl+C. It only reads the database. It shows:
 
-- the coordinator's heartbeat, code, free disk, free memory and swap used; queue totals; jobs finished in the last hour and 24 hours, and how long the oldest queued job has waited; and the last backup;
-- each worker's heartbeat, code (red if it differs from the coordinator's, so it missed a deploy), free disk, free memory, swap used, today's done and failed, and its running job. Workers send their code, disk, memory and swap with each heartbeat;
+- the coordinator's heartbeat, CPU use, free disk, free memory and swap used; queue totals; jobs finished in the last hour and 24 hours, and how long the oldest queued job has waited; and the last backup;
+- each worker's heartbeat, code (red if it differs from the coordinator's, so it missed a deploy), CPU use, free disk, free memory, swap used, today's done and failed, and its running job. Workers send their code, CPU, disk, memory and swap with each heartbeat;
 - each tab's queued, running, last 24 hours' done and failed, its rows, blank statuses and when sync last read it (red if a tab that's on hasn't been read for a minute);
 - queued jobs that can't be claimed yet, and why;
 - the 10 busiest sites in the last 24 hours, with done, failed, blocked and average time;
 - files and GB stored in the last 24 hours, and any job with files that couldn't be stored;
-- the last 5 failed or blocked jobs, and the last 10 finished;
+- the last 5 failed or blocked jobs, and the last 5 finished;
 - unsent and recent alerts.
 
 Green is fine, yellow is worth a look, red needs action.

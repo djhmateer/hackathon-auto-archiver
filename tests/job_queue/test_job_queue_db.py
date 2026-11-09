@@ -510,7 +510,13 @@ def test_a_retry_keeps_each_attempts_files(conn):
 
 
 def test_a_heartbeat_saves_the_workers_code_and_machine(conn):
-    stats = {"disk_free_bytes": 1, "mem_available_bytes": 2, "mem_total_bytes": 3, "swap_used_bytes": 4}
+    stats = {
+        "cpu_percent": 5.5,
+        "disk_free_bytes": 1,
+        "mem_available_bytes": 2,
+        "mem_total_bytes": 3,
+        "swap_used_bytes": 4,
+    }
     db.beat(conn, "worker-supervisor-vm1", "abc1234", stats)
     db.beat(conn, "worker-supervisor-vm1", "def5678", stats)
     (beat,) = db.get_worker_heartbeats(conn)

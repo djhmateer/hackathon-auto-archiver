@@ -137,14 +137,31 @@ def git_commit() -> str:
         return "unknown"
 
 
+_last_cpu = None  # (idle, total) from the previous cpu_percent()
+
+
+def cpu_percent() -> float | None:
+    """CPU use since the previous call, 0-100 across all cores, from /proc/stat. None the first time"""
+    global _last_cpu
+    with open("/proc/stat") as f:
+        # cpu  user nice system idle iowait irq softirq steal ...
+        ticks = [int(value) for value in f.readline().split()[1:9]]
+    idle, total = ticks[3] + ticks[4], sum(ticks)
+    last, _last_cpu = _last_cpu, (idle, total)
+    if last is None or total == last[1]:
+        return None
+    return round(100 * (1 - (idle - last[0]) / (total - last[1])), 1)
+
+
 def machine_stats(path: str) -> dict:
-    """Free disk where path is, and memory and swap from /proc/meminfo, in bytes, for the heartbeat (db.STAT_COLUMNS)"""
+    """CPU use, free disk where path is, and memory and swap in bytes, for the heartbeat (db.STAT_COLUMNS)"""
     meminfo = {}
     with open("/proc/meminfo") as f:
         for line in f:
             name, value = line.split(":", 1)
             meminfo[name] = int(value.split()[0]) * 1024  # in kB
     return {
+        "cpu_percent": cpu_percent(),
         "disk_free_bytes": shutil.disk_usage(path).free,
         "mem_available_bytes": meminfo["MemAvailable"],
         "mem_total_bytes": meminfo["MemTotal"],
