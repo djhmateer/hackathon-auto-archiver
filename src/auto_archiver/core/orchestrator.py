@@ -54,6 +54,13 @@ if TYPE_CHECKING:
 
 
 # a normal row takes 2-5 minutes
+# loguru's default format with the queue's job id after the level, eg
+# 2026-01-01 12:00:00.000 | INFO     | job 92 | auto_archiver.core.orchestrator:feed:123 - ...
+JOB_FORMAT = (
+    "<green>{time:YYYY-MM-DD HH:mm:ss.SSS}</green> | <level>{level: <8}</level> | job {extra[job]} | "
+    "<cyan>{name}</cyan>:<cyan>{function}</cyan>:<cyan>{line}</cyan> - <level>{message}</level>"
+)
+
 SLOW_ROW_SECONDS = 15 * 60
 HANG_DUMP_SECONDS = 30 * 60
 # DM 25th Oct 26 - each new kind of hang was found only after it had blocked a server for hours (a live radio
@@ -441,7 +448,15 @@ Here's how that would look: \n\nsteps:\n  extractors:\n  - [your_extractor_name_
                 # also my cron job looks at the output of 1debug.log which is critical (todo - maybe not so critical anymore)
                 log_dir = "logs"
                 os.makedirs(log_dir, exist_ok=True)
-                logger.add(os.path.join(log_dir, "1debug.log"), level="DEBUG", rotation=rotation)
+                # DM 9th Nov 26 - on a queue worker, every line says which job it's for, so all of a job's lines can be
+                # found (the supervisor sets AA_JOB_ID). Cron runs have no job, so their lines stay as they were
+                job_id = os.environ.get("AA_JOB_ID")
+                if job_id:
+                    # also adds "job" to the 3success/4warning/5error JSON, as extract_log_data copies it
+                    logger.configure(extra={"job": job_id})
+                    logger.add(os.path.join(log_dir, "1debug.log"), level="DEBUG", rotation=rotation, format=JOB_FORMAT)
+                else:
+                    logger.add(os.path.join(log_dir, "1debug.log"), level="DEBUG", rotation=rotation)
 
                 # DM 7th Nov 25 - turned off the serialzed log to save SSD wear
                 # logger.add("logs/x1debug.log", level="DEBUG", rotation=rotation, format="{extra[serialized]}")

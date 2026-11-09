@@ -33,6 +33,9 @@ sudo apt-get install -y git curl wget unzip ca-certificates gnupg build-essentia
     ffmpeg libimage-exiftool-perl tesseract-ocr fonts-noto
 sudo install -m 0755 -d /etc/apt/keyrings
 
+echo "=== sysstat, every minute"
+bash scripts/job_queue/setup-sysstat.sh
+
 echo "=== No crash dumps, which would reserve 512 MB of a 4 GB VM's RAM. Applies from the reboot"
 sudo apt-get purge -y kdump-tools
 sudo update-grub

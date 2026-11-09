@@ -305,7 +305,7 @@ def run_for_real(conn, tmp_path, monkeypatch, database_url):
             time.sleep(0.2)
         if sup.running:
             sup.running.process.kill()
-        output = (tmp_path / "logs" / "last-job-console.log").read_text()[-3000:]
+        output = (tmp_path / "logs" / "console" / f"job_{job_ids[-1]}.log").read_text()[-3000:]
         pytest.fail(f"The jobs didn't finish. The child's output:\n{output}")
 
     return run
@@ -315,8 +315,12 @@ def test_real_child_archives_a_job_end_to_end(conn, run_for_real, tmp_path):
     sup, (job_id,) = run_for_real(["https://example.com/post/1"])
 
     current = db.get_job(conn, job_id)
-    assert current["status"] == "done", (tmp_path / "logs" / "last-job-console.log").read_text()[-3000:]
+    assert current["status"] == "done", (tmp_path / "logs" / "console" / f"job_{job_id}.log").read_text()[-3000:]
     assert current["work_started_at"] is not None
+    # every line of the archiver's debug log says which job it's for
+    debug_lines = (tmp_path / "logs" / "1debug.log").read_text().splitlines()
+    assert any(line.startswith("20") for line in debug_lines)
+    assert all(f" | job {job_id} | " in line for line in debug_lines if line.startswith("20"))
     cells = conn.execute("SELECT cells FROM sheet_writes ORDER BY id DESC LIMIT 1").fetchone()["cells"]
     assert cells["status"] == "fake_extractor: success"
     assert cells["title"] == "A fake title"
@@ -349,7 +353,10 @@ def test_real_child_with_a_bad_config_is_a_setup_failure(conn, run_for_real, tmp
     current = db.get_job(conn, job_id)
     assert (current["status"], current["attempts"], current["work_started_at"]) == ("queued", 0, None)
     assert conn.execute("SELECT setup_failures FROM sheets").fetchone()["setup_failures"] == 1
-    assert (tmp_path / "logs" / "last-job-console.log").read_text() != ""
+    console = (tmp_path / "logs" / "console" / f"job_{job_id}.log").read_text()
+    header, output = console.split("\n", 1)
+    assert header.startswith(f"===== job {job_id} attempt 1 started ")
+    assert output.strip() != ""  # the setup error
 
 
 def test_real_child_killed_mid_job_has_its_processes_and_files_cleared(conn, run_for_real, tmp_path, mocker):
@@ -373,6 +380,6 @@ def test_real_child_killed_mid_job_has_its_processes_and_files_cleared(conn, run
     _, (job_id,) = run_for_real(["https://example.com/post/1"])
 
     current = db.get_job(conn, job_id)
-    assert current["status"] == "failed", (tmp_path / "logs" / "last-job-console.log").read_text()[-3000:]
+    assert current["status"] == "failed", (tmp_path / "logs" / "console" / f"job_{job_id}.log").read_text()[-3000:]
     assert "killed" in current["error"]
     assert not (tmp_path / "tmp").exists()

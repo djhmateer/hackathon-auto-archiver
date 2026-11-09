@@ -27,6 +27,9 @@ if [ -z "$(apt-cache policy postgresql-18 | awk '/Candidate:/ {print $2}' | grep
 fi
 sudo apt-get install -y git curl build-essential libpq5 postgresql-18
 
+echo "=== sysstat, every minute"
+bash scripts/job_queue/setup-sysstat.sh
+
 echo "=== Python 3.12 and Poetry"
 export PATH="$HOME/.local/bin:$PATH"
 command -v uv >/dev/null || curl -LsSf https://astral.sh/uv/install.sh | sh

@@ -34,9 +34,23 @@ PAUSE_SECONDS = 15 * 60
 FORCE_REBOOT_AFTER_SECONDS = 60 * 60
 REBOOT_TIMEZONE = ZoneInfo("Europe/London")
 ARCHIVER_PATH = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
-# the archiver's console output for the last job only, at ERROR: setup errors, which happen before its logs are set
-# up, and crashes. Everything else is in 1debug.log
-CONSOLE_LOG = "last-job-console.log"
+# the archiver's console output, at ERROR: setup errors, which happen before its logs are set up, and crashes.
+# Everything else is in 1debug.log. One file per job, eg logs/console/job_92.log, kept for CONSOLE_KEEP_DAYS
+CONSOLE_DIR = os.path.join("logs", "console")
+CONSOLE_KEEP_DAYS = 14
+
+
+def console_log(worker_dir: str, job_id: int) -> str:
+    return os.path.join(worker_dir, CONSOLE_DIR, f"job_{job_id}.log")
+
+
+def prune_console_logs(worker_dir: str) -> None:
+    """Deletes console logs older than CONSOLE_KEEP_DAYS"""
+    folder = os.path.join(worker_dir, CONSOLE_DIR)
+    cutoff = time.time() - CONSOLE_KEEP_DAYS * 24 * 60 * 60
+    for path in glob.glob(os.path.join(folder, "job_*.log")):
+        if os.path.getmtime(path) < cutoff:
+            os.remove(path)
 
 
 def run_docker(*args: str) -> str:
@@ -102,8 +116,14 @@ def start_child(job: dict, worker_dir: str, extra_args: tuple = ()) -> subproces
         *extra_args,
     ]
     env = {**os.environ, "AA_WORKER_DIR": worker_dir, "AA_JOB_ID": str(job["id"])}
-    os.makedirs(os.path.join(worker_dir, "logs"), exist_ok=True)
-    with open(os.path.join(worker_dir, "logs", CONSOLE_LOG), "w") as output:
+    os.makedirs(os.path.join(worker_dir, CONSOLE_DIR), exist_ok=True)
+    prune_console_logs(worker_dir)
+    # appended, so a retry's output follows the earlier attempts'
+    with open(console_log(worker_dir, job["id"]), "a") as output:
+        output.write(
+            f"===== job {job['id']} attempt {job['attempts']} started {datetime.now(timezone.utc):%Y-%m-%d %H:%M:%S} UTC\n"
+        )
+        output.flush()
         return subprocess.Popen(
             args, env=env, stdout=output, stderr=subprocess.STDOUT, preexec_fn=_die_with_parent, start_new_session=True
         )
@@ -289,7 +309,9 @@ class WorkerSupervisor:
         elif current["work_started_at"] is None:
             # negative is the signal that killed it. It may have had no chance to log anything
             code = running.process.poll()
-            logger.error(f"Job {job['id']} exited during setup with code {code}, see {self.dir}/logs/{CONSOLE_LOG}")
+            logger.error(
+                f"Job {job['id']} exited during setup with code {code}, see {console_log(self.dir, job['id'])}"
+            )
             db.release_setup_failure(conn, job["id"], job["lease_token"])
             self._record_quick_failure(job["sheet_id"], conn)
         else:
@@ -405,7 +427,7 @@ class WorkerSupervisor:
         logger.info(
             f"Started worker {self.worker}, pid {os.getpid()}, code {self.git_commit}, database {db.describe_database()}, "
             f"in {self.dir}, checking every {TICK_SECONDS}s, daily reboot at {self.reboot_at or 'never'}. "
-            f"Archiver logs in {os.path.join(self.dir, 'logs')}: 1debug.log, and {CONSOLE_LOG} for console output: "
+            f"Archiver logs in {os.path.join(self.dir, 'logs')}: 1debug.log, and {CONSOLE_DIR}/job_<id>.log for console output: "
             "setup errors and crashes"
         )
 

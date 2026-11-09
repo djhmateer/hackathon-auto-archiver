@@ -1,6 +1,7 @@
 #!/bin/bash
 # Deploys main to the coordinator VM over SSH: stop, pull, sync, back up the database, migrate, start.
-# Also makes sure the nightly database backup is in the coordinator's crontab (see backup-db.sh).
+# Also makes sure the nightly database backup (backup-db.sh) and the morning report (job_queue/report.py) are in the
+# coordinator's crontab.
 # Also copies the alert email settings (POSTMARK_API_TOKEN, POSTMARK_FROM_EMAIL, ALERT_EMAIL_TO) from your .env.
 # Packages come from the committed poetry.lock: run poetry update locally, test and push, never on the VM.
 # --reset-except-sheets also empties every queue table except sheets (and schema_migrations), to start again.
@@ -80,17 +81,25 @@ poetry sync --only main
 echo "== Backing up the database"
 bash scripts/job_queue/backup-db.sh
 
+# adds a cron line if it isn't there, replacing an older one that contains $2, and keeping any other lines
+cron_line() {
+    local line="$1" marker="$2" existing
+    existing="$(crontab -l 2>/dev/null || true)"
+    if grep -qxF "$line" <<<"$existing"; then
+        echo "already in the crontab"
+    else
+        { grep -vF -e "$marker" <<<"$existing" | grep -v '^$' || true; echo "$line"; } | crontab -
+        echo "added to the crontab: $line"
+    fi
+}
+
 echo "== Nightly backup at 02:30 UTC"
 mkdir -p "$HOME/backups"
-CRON_LINE="30 2 * * * bash $PWD/scripts/job_queue/backup-db.sh >> $HOME/backups/backup.log 2>&1"
-EXISTING="$(crontab -l 2>/dev/null || true)"
-if grep -qxF "$CRON_LINE" <<<"$EXISTING"; then
-    echo "already in the crontab"
-else
-    # keeps any other cron lines, and replaces an older backup line
-    { grep -vE "backup-db\.sh|^$" <<<"$EXISTING" || true; echo "$CRON_LINE"; } | crontab -
-    echo "added to the crontab: $CRON_LINE"
-fi
+cron_line "30 2 * * * bash $PWD/scripts/job_queue/backup-db.sh >> $HOME/backups/backup.log 2>&1" "backup-db.sh"
+
+echo "== Morning report at 05:00 UTC"
+mkdir -p "$HOME/reports"
+cron_line "0 5 * * * cd $PWD && $HOME/.local/bin/poetry run python -m auto_archiver.job_queue.report >> $HOME/reports/report.log 2>&1" "auto_archiver.job_queue.report"
 
 echo "== Migrating"
 poetry run python -m auto_archiver.job_queue.migrate

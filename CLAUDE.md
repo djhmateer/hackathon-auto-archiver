@@ -50,35 +50,42 @@ New modules should follow the existing pattern:
   - `ssh 192.168.1.212 -p 340` - coordinator (Postgres job queue)
   - `ssh 192.168.1.212 -p 341` - glanworker1 (was worker41)
   - `ssh 192.168.1.212 -p 342` - glanworker2 (was worker42)
-- Never connect to any other production server or host (e.g. servers 11-15); use `aa_logs` and the mirrored logs below.
+- Never connect to any other production server or host. The old cron servers 11-15 are retired (Nov 2026).
+- On the pve3 VMs, read-only commands are fine (logs, `journalctl`, `df`, `SELECT`s). Anything that changes a VM
+  (restarts, edits, installs, `INSERT`/`UPDATE`/`DELETE`) needs the user's go-ahead in that message; otherwise give
+  them the exact command. Never read anything in a VM's `secrets/` or `.env`.
 
 ## Investigating Production Errors
 
-When asked to look at the prod logs, query the PostgreSQL database `aa_logs` first. The `aa-logs` project
-(`/home/dave/code/aa-logs`) imports every log line, at all levels, from the production servers into it:
-- Connect with `PGPASSWORD=password psql -h localhost -U bob -d aa_logs`
-- `logs` (`server_id` 11-15, `timestamp` TIMESTAMPTZ, `log_level`, `message`) - one row per log entry, all levels
-  (DEBUG/INFO/SUCCESS/WARNING/ERROR), multi-line entries kept together
-- `reboot` (`server_id`, `rebooted_at`) - daily reboot times; `log_files_parsed` - which files were imported
-- Server log times are UTC; compare in UTC (e.g. `timestamp >= '2026-10-03 08:00+00'`)
-- `message` keeps the module prefix (e.g. `auto_archiver.modules.s3_storage.s3_storage:uploadf:58 - Uploading ...`),
-  so match with `LIKE '%Uploading %'`, not `LIKE 'Uploading %'`
-- The data is only as fresh as the last `aa-logs` import, so check `max(timestamp)` per server.
-  Don't run the import yourself; ask the user.
+Production is the Postgres job queue on pve3 (see README_QUEUE.md): the coordinator syncs the sheets and writes
+results back, and the two workers each run one archiver job at a time. Server times are UTC; compare in UTC.
 
-The same log files are also mirrored at `/mnt/t/aa-dashboard-log-import/<server_number>/` (one subfolder per
-production server, e.g. `11`-`15`). Use them for anything not in the database. Each folder contains:
-- `1debug.log` - the current, full DEBUG-level log (large, tens of MB)
-- `3success.log` / `4warning.log` - filtered current-level logs
-- rotated/archived copies named `1debug.<rotation-start-timestamp>.log` for older periods
-- `reboot.log` - one line per daily reboot by the cron script (`FORCED` when it killed a hung run)
-- `hangs.log` - every thread's stack, written when a row runs over 30 minutes (logged as a "Row still running"
-  WARNING) or on `kill -USR1 <pid>`; read this first when a server stalls
+Where to look, in this order:
+1. The queue database on the coordinator - every job, its attempts, worker, timings, error, sheet writes, files
+   stored, alerts and heartbeats. Query it read-only over ssh:
+   `ssh 192.168.1.212 -p 340 "PGPASSWORD=password psql -h localhost -U bob -d auto_archiver -c \"SELECT ...\""`
+   - `jobs` (`id`, `sheet_id`, `row_number`, `domain`, `status`, `attempts`, `worker`, `started_at`,
+     `finished_at`, `error`, `git_commit`, `extractor`, ...), `sheets`, `sheet_writes` (`cells` JSON, eg the status
+     written), `job_files`, `admin_alerts`, `heartbeats`. The schema is in `src/auto_archiver/job_queue/migrations/`.
+2. The coordinator's log: `journalctl -u aa-coordinator` on 340 - each job queued, claimed and finished, workers
+   going quiet, sheet writes, sync and alert email errors.
+3. A worker's logs, on 341 or 342 (from `jobs.worker`), in `~/auto-archiver/logs/`:
+   - `1debug.log` (and rotated copies) - the archiver at DEBUG. Every line has the job id after the level, eg
+     `| INFO     | job 92 | auto_archiver.core.orchestrator:feed:123 - ...`, so `grep "| job 92 |"` gives a whole job
+   - `console/job_<id>.log` - the archiver's console output at ERROR, one header line per attempt: setup errors
+     (before logging starts) and crashes. Kept 14 days
+   - `hangs.log` - every thread's stack when a row runs over 30 minutes, or on `kill -USR1 <pid>`
+   - `journalctl -u aa-worker-supervisor` - claims, finishes, time-limit kills, reboots; `journalctl -k` for OOM
+     kills
+4. `aa_logs_pve3` on localhost, once the `aa-logs-pve3` project exists - everything above imported daily by the
+   user. Check its freshness (max timestamp per server) and ask the user to import rather than running it yourself.
 
-The DEBUG-level detail around a WARNING/ERROR line (e.g. surrounding requests, timings, retries) often
-gives much better context for root-causing an issue than the bare error line alone - query the surrounding
-rows in `aa_logs` (or grep the relevant server's `1debug.log`) for the timestamp/module/request in question
-rather than relying only on what was pasted into the conversation.
+The DEBUG-level detail around a WARNING/ERROR line (surrounding requests, timings, retries) often gives much better
+context for root-causing an issue than the bare error line alone - read a job's surrounding lines rather than
+relying only on what was pasted into the conversation.
+
+The `aa_logs` database and `/mnt/t/aa-dashboard-log-import/` only hold the retired servers 11-15's history (up to
+Nov 2026). Use them only for comparisons with how the cron servers behaved.
 
 ## Testing
 

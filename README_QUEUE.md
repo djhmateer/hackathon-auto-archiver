@@ -158,7 +158,7 @@ bash scripts/job_queue/deploy-coordinator.sh --reset-except-sheets   # the same,
 
 Before stopping the coordinator, it also copies the three alert email settings from your `.env` into the coordinator's `.env`, replacing any older copies. It keeps the coordinator's own `AA_DATABASE_URL`, and stops if any of the three is missing from your `.env`. It never prints their values.
 
-It backs up the database before migrating, and adds the nightly backup to the coordinator's crontab if it isn't there. See [Backups](#backups).
+It backs up the database before migrating, and adds the nightly backup and the [morning report](#morning-report) to the coordinator's crontab if they aren't there. See [Backups](#backups).
 
 The script stops at the first step that fails, which leaves the coordinator stopped.
 
@@ -265,6 +265,23 @@ On the coordinator, `d` (or `poetry run python -m auto_archiver.job_queue.dashbo
 
 Green is fine, yellow is worth a look, red needs action.
 
+### Morning report
+
+At 05:00 UTC, before the workers' 05:20 reboot, cron on the coordinator runs `job_queue/report.py` over the last 24 hours. `deploy-coordinator.sh` adds the cron line. The report lists the problems first: failed jobs, jobs killed at the time limit, sites that blocked the archiver, files that couldn't be stored, alerts raised or left unsent, a backlog, unsent sheet writes, paused or unread tabs, quiet workers, workers on different code, low disk, memory or swap, and a missing backup. Then come the totals per sheet, site (with median and p95 time), worker, and storage per client, plus jobs per hour and the day's alerts.
+
+It's emailed with the alert settings, saved to `~/reports/report_<date>.txt`, and logged to `~/reports/report.log`. It holds aggregates and job ids only, never URLs. To run it by hand, on the coordinator:
+
+```bash
+poetry run python -m auto_archiver.job_queue.report --no-email      # print and save only
+poetry run python -m auto_archiver.job_queue.report --hours 72      # a longer window, emailed
+```
+
+### Machine history
+
+`scripts/job_queue/setup-sysstat.sh` sets sysstat to sample CPU, memory, swap, disk and pressure every minute, keeping 28 days, for the log analysis. The install scripts run it. On a VM installed before it existed, run it once by hand: `bash scripts/job_queue/setup-sysstat.sh`. To read it, for example: `sar -r` for memory, `sar -u` for CPU, `sar -q MEM` for memory pressure, or `sar -r -f /var/log/sysstat/sa08` for the 8th.
+
+### Querying the database
+
 For anything else, query the database:
 
 ```bash
@@ -277,7 +294,9 @@ $Q "SELECT name, beat_at FROM heartbeats"
 $Q "SELECT kind, message, created_at FROM admin_alerts ORDER BY id DESC LIMIT 20"
 ```
 
-These alerts are emailed (see [Configuration](#configuration)): `site_blocked`, `sheet_paused`, `worker_paused`, `writer_discarded` and `reboot_failed`. They're listed in `EMAIL_KINDS` in `job_queue/alerts.py`. `sheet_disagrees` is raised once a day per row for as long as the disagreement lasts, so it isn't emailed. Check `admin_alerts` for it now and then. Each email ends with the alert's kind; [Troubleshooting](#troubleshooting) says what to do for each one.
+### Alerts
+
+These alerts are emailed (see [Configuration](#configuration)): `site_blocked`, `sheet_paused`, `worker_paused`, `writer_discarded` and `reboot_failed`. They're listed in `EMAIL_KINDS` in `job_queue/alerts.py`. `sheet_disagrees` is raised once a day per row for as long as the disagreement lasts, so it isn't emailed; it's counted in the morning report. Each email ends with the alert's kind; [Troubleshooting](#troubleshooting) says what to do for each one.
 
 A `site_blocked` alert means a site in `EMAIL_WHEN_BLOCKED` (in `queue_feeder_db.py`, currently `idf.il`) blocked the crawler, and the status asks for a requeue (`... (blocked by site - please requeue)`). These blocks usually lift within hours, so clear the row's status to archive it again. The coordinator emails each one once, with the sheet, row, URL and status, then sets its `sent_at`. If Postmark fails, it tries again 5 minutes later.
 
@@ -289,8 +308,8 @@ A `writer_discarded` alert means a job's result never reached the sheet, because
 |---|---|
 | Coordinator | `journalctl -u aa-coordinator -f` (alias `j` on the coordinator VM) |
 | Worker supervisor | `journalctl -u aa-worker-supervisor -f` (alias `j` on each worker VM) |
-| Archiver | `logs/` on the worker, e.g. `1debug.log`, and `hangs.log` for stack dumps of stalled rows |
-| Errors during a job's setup, and crashes | `logs/last-job-console.log` on the worker (last job only) |
+| Archiver | `logs/` on the worker, e.g. `1debug.log`, and `hangs.log` for stack dumps of stalled rows. On a worker every `1debug.log` line has the job id after the level (e.g. `INFO     \| job 92 \| ...`), and the JSON logs (`3success.log` and the others) have a `job` key |
+| Errors during a job's setup, and crashes | `logs/console/job_<id>.log` on the worker, one file per job with a header line for each attempt, kept 14 days |
 
 The coordinator's log is the best single view of the system. It records each job as it is queued, claimed and finished, each worker coming up or going quiet, and every sheet write.
 
@@ -298,7 +317,7 @@ The coordinator's log is the best single view of the system. It records each job
 
 **A queued job isn't being claimed.** Only one job per site runs at a time. The coordinator logs each job held back for this reason once: `Not claimed yet: job <id> … waits for its site <domain>, as job <id> on worker <worker_name> is running it`. A job can also be waiting for a retry delay, or belong to a sheet that is paused or not enabled.
 
-**A sheet has been paused.** After 3 setup failures in a row (the archiver exits before it starts work), the sheet is paused for 15 minutes and an alert is raised. The cause is usually a missing or broken config, or missing secrets on a worker. Check `logs/last-job-console.log` on the worker. The pause clears once a job from that sheet gets past setup.
+**A sheet has been paused.** After 3 setup failures in a row (the archiver exits before it starts work), the sheet is paused for 15 minutes and an alert is raised. The cause is usually a missing or broken config, or missing secrets on a worker. Check `logs/console/job_<id>.log` on the worker; the supervisor's error line names the file. The pause clears once a job from that sheet gets past setup.
 
 **A worker has stopped claiming jobs.** If a worker has 3 quick failures in a row across different sheets, it stops claiming for 15 minutes and raises an alert, so that a broken VM can't empty the queue.
 

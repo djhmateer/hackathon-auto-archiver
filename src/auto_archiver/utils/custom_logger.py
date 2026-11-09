@@ -18,7 +18,7 @@ def extract_log_data(record):
     subset["loc"] = extract_location(record)
 
     # This is where logger.contextualize() parameters can be added to the output
-    for extra_key in ["trace", "url", "worksheet", "row"]:
+    for extra_key in ["trace", "url", "worksheet", "row", "job"]:
         if extra_val := record.get("extra", {}).get(extra_key):
             subset[extra_key] = extra_val
 

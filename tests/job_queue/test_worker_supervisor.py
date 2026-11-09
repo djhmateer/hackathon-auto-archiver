@@ -682,3 +682,15 @@ def test_cpu_percent_is_none_at_first_then_a_percentage(monkeypatch):
         pass
     percent = worker_supervisor.cpu_percent()
     assert percent is None or 0 <= percent <= 100
+
+
+def test_console_logs_older_than_the_keep_days_are_pruned(tmp_path):
+    folder = tmp_path / worker_supervisor.CONSOLE_DIR
+    folder.mkdir(parents=True)
+    old, new = folder / "job_1.log", folder / "job_2.log"
+    old.write_text("old")
+    new.write_text("new")
+    long_ago = time.time() - (worker_supervisor.CONSOLE_KEEP_DAYS + 1) * 24 * 60 * 60
+    os.utime(old, (long_ago, long_ago))
+    worker_supervisor.prune_console_logs(str(tmp_path))
+    assert not old.exists() and new.exists()
