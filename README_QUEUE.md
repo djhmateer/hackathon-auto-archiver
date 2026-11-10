@@ -110,6 +110,22 @@ Postgres accepts remote connections only from subnets the VM is directly attache
 
 Target: Ubuntu 26.04.
 
+To make the VM on Proxmox, run `scripts/job_queue/new-worker-vm.sh` as root on the Proxmox host. It makes a full clone of the Ubuntu 26.04 template (VM 1001), with the memory and cores of an existing worker and a 64 GB disk, and starts it. Set `STORAGE=vm-storage` to put its disks there.
+
+The template was installed from the ISO, so cloud-init is off and the clone is still a copy of it: its hostname, machine-id (which is also its DHCP client id) and SSH host keys, and a 15 GB `/`. The hostname is the worker's name on the queue. So before anything else, on the new VM, run `scripts/job_queue/prepare-clone.sh <worker_name>` and reboot. It sets the hostname, makes a new machine-id and SSH host keys, and grows `/` to fill the disk.
+
+```bash
+# on the Proxmox host
+STORAGE=vm-storage bash new-worker-vm.sh <new_vmid> <worker_name>
+# then, once its SSH port forward is set up, from your machine: copies your SSH key to it, runs prepare-clone.sh on
+# it and reboots it. Asks for the template's password, then for sudo
+bash scripts/job_queue/setup-clone.sh <ssh_port> <worker_name>
+```
+
+Do one clone at a time, up to its reboot: until then every clone has the template's machine-id, so they'd all get the same DHCP address.
+
+Then give it a DHCP reservation and an SSH port forward, as for the other workers, and on the VM:
+
 ```bash
 git clone https://github.com/djhmateer/hackathon-auto-archiver.git ~/auto-archiver
 cd ~/auto-archiver
@@ -131,6 +147,7 @@ The script enables the `aa-worker-supervisor` service but doesn't start it. Then
 2. **Reboot** with `sudo reboot`. This applies the `docker` group membership and frees the 512 MB of memory that was reserved for crash dumps (the script removes `kdump-tools`).
 3. **Check the log** with `j`, an alias for `journalctl -u aa-worker-supervisor -f`. Look for `Started worker <worker_name>, … daily reboot at 05:20`, followed by `Waiting for jobs: …`. The coordinator logs `Worker <worker_name> is up`.
 4. **Add the worker to `update-os.sh`**, so OS updates reach it.
+5. **Put it in a pool.** On the coordinator, `$Q "INSERT INTO workers (name, pool) VALUES ('<worker_name>', '<pool>')"`. Until then it claims nothing, and the dashboard shows its pool in red. See [Pools and organisations](#pools-and-organisations).
 
 Notes:
 
