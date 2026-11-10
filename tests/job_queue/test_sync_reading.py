@@ -276,3 +276,31 @@ def test_saves_what_it_read_for_the_dashboard(conn, config):
     tab = conn.execute("SELECT url_rows, blank_rows, last_read_at FROM sheets").fetchone()
     assert (tab["url_rows"], tab["blank_rows"]) == (2, 1)
     assert tab["last_read_at"] is not None
+
+
+def test_a_slow_spreadsheet_is_logged_with_where_the_time_went(conn, config, caplog, monkeypatch):
+    sheet = FakeSpreadsheet([tab_of(row("https://example.com/1"))])
+    setup_sheet(conn, sheet)
+    run(conn, sheet)
+    assert "Sync of sheet" not in caplog.text  # quick, so not logged
+
+    monkeypatch.setattr(sync, "SLOW_SPREADSHEET_SECONDS", 0)
+    run(conn, sheet)
+    assert "Sync of sheet 'Example Sheet' took " in caplog.text
+    assert "reading 1 tab(s) " in caplog.text
+
+
+def test_after_each_runs_after_every_spreadsheet_even_a_broken_one(conn, config):
+    good = FakeSpreadsheet([tab_of(row("https://example.com/1"))], spreadsheet_id="good")
+    db.save_tab(conn, "bad", 1, "Tab 1", CONFIG)
+    db.save_tab(conn, "good", 1, "Tab 1", CONFIG)
+    conn.execute("UPDATE sheets SET enabled = true")
+
+    def opener(settings, spreadsheet_id=None):
+        if spreadsheet_id == "bad":
+            raise RuntimeError("a Sheets outage")
+        return good
+
+    calls = []
+    sync.sync_cycle(conn, opener, after_each=lambda: calls.append(1))
+    assert len(calls) == 2

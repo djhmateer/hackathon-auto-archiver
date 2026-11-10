@@ -122,12 +122,16 @@ class Watcher:
 
 
 def cycle(conn, sync_due: bool, watcher: Watcher = None) -> None:
+    def watch_and_write() -> None:
+        # the watcher first, so a job's "Queued" and "claimed" lines come before the writer's lines for it
+        if watcher is not None:
+            run_step("watch", lambda: watcher.watch(conn))
+        run_step("writer", lambda: writer.writer_cycle(conn))
+
     if sync_due:
-        run_step("sync", lambda: sync.sync_cycle(conn))
-    # before the writer, so a job's "Queued" and "claimed" lines come before the writer's lines for it
-    if watcher is not None:
-        run_step("watch", lambda: watcher.watch(conn))
-    run_step("writer", lambda: writer.writer_cycle(conn))
+        # DM 10th Nov 26 - also between spreadsheets: a pass over them all takes ~50s, which held up the sheet writes
+        run_step("sync", lambda: sync.sync_cycle(conn, after_each=watch_and_write))
+    watch_and_write()
     run_step("cleanup", lambda: cleanup(conn))
     run_step("alerts", lambda: alerts.email_alerts(conn))
     db.beat(conn, "coordinator")

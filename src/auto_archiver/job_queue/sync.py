@@ -32,6 +32,7 @@ READ_ONLY_SCOPES = [
 ]
 SHEETS_TIMEOUT_SECONDS = 60
 SYNC_INTERVAL_SECONDS = 60
+SLOW_SPREADSHEET_SECONDS = 5  # a spreadsheet whose sync takes longer is logged with where the time went
 OPTIONAL_COLUMNS = ("folder",)
 
 ADD = "add"
@@ -303,16 +304,21 @@ def live_tab(
             db.add_alert_once(conn, "sheet_disagrees", f"Sheet {sheet_id} row {action.row}: {action.message}")
 
 
-def sync_cycle(conn, opener=open_spreadsheet) -> None:
-    """One pass over every spreadsheet. A failure only loses that spreadsheet's turn"""
+def sync_cycle(conn, opener=open_spreadsheet, after_each=None) -> None:
+    """
+    One pass over every spreadsheet. A failure only loses that spreadsheet's turn. after_each runs after each
+    spreadsheet, eg the sheet writer, so a long pass doesn't hold it up
+    """
     spreadsheets = {(sheet["spreadsheet_id"], sheet["config"]) for sheet in db.get_sheets(conn)}
     for spreadsheet_id, config_path in sorted(spreadsheets):
         try:
+            started = time.monotonic()
             settings = load_settings(config_path)
             # before reading the sheet, for sync rule 1
             snapshot_at = db.now(conn)
             spreadsheet = opener(settings, spreadsheet_id)
             tabs = allowed_tabs(spreadsheet, settings)
+            opened = time.monotonic()
             for tab in tabs:
                 # new tabs, and renames of tabs and the spreadsheet
                 db.save_tab(conn, spreadsheet_id, tab.id, tab.title, config_path, spreadsheet_name=spreadsheet.title)
@@ -341,7 +347,9 @@ def sync_cycle(conn, opener=open_spreadsheet) -> None:
             }
             # a tab that's off isn't read, as cron still owns it
             tabs = [tab for tab in tabs if tab.id in sheets and sheets[tab.id]["enabled"]]
-            for gid, rows in read_tabs(spreadsheet, tabs, settings).items():
+            rows_by_tab = read_tabs(spreadsheet, tabs, settings)
+            read = time.monotonic()
+            for gid, rows in rows_by_tab.items():
                 sheet = sheets[gid]
                 title, name = sheet["worksheet"], settings["sheet"] or spreadsheet.title
                 blank = sum(row.status in ("", None) for row in rows)
@@ -352,8 +360,17 @@ def sync_cycle(conn, opener=open_spreadsheet) -> None:
                     f"{db.describe_tab(spreadsheet.title, title)} (live): {len(rows)} row(s) with a URL, "
                     f"{blank} blank status",
                 )
+            took = time.monotonic() - started
+            if took >= SLOW_SPREADSHEET_SECONDS:
+                logger.info(
+                    f"Sync of sheet '{spreadsheet.title}' took {took:.1f}s: opening and listing its tabs "
+                    f"{opened - started:.1f}s, reading {len(tabs)} tab(s) {read - opened:.1f}s, "
+                    f"working out the jobs {time.monotonic() - read:.1f}s"
+                )
         except Exception as e:
             logger.error(f"Sync of config {config_path} failed: {e}")
+        if after_each is not None:
+            after_each()
     db.beat(conn, "sync")
 
 

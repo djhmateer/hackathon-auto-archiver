@@ -44,6 +44,17 @@ def test_sync_only_runs_when_due(conn, mocker):
     sync.assert_not_called()
 
 
+def test_the_writer_also_runs_between_spreadsheets(conn, mocker):
+    def two_spreadsheets(conn, after_each=None):
+        after_each()
+        after_each()
+
+    mocker.patch("auto_archiver.job_queue.sync.sync_cycle", side_effect=two_spreadsheets)
+    writer = mocker.patch("auto_archiver.job_queue.writer.writer_cycle")
+    coordinator.cycle(conn, sync_due=True)
+    assert writer.call_count == 3  # after each spreadsheet, and after the pass
+
+
 def test_cleanup_requeues_an_expired_job(conn, mocker):
     mocker.patch("auto_archiver.job_queue.writer.writer_cycle")
     sheet = conn.execute(
