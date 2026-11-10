@@ -264,6 +264,18 @@ def register(conn, config_path: str, opener=open_spreadsheet) -> int:
     return len(tabs)
 
 
+def add(conn, config_path: str, opener=open_spreadsheet) -> int | None:
+    """
+    For a deploy: registers a config that isn't on the queue yet and turns its tabs on. Returns how many tabs, or None
+    if it was already there. One that is, eg turned off by rollback, is left as it is
+    """
+    if any(sheet["config"] == config_path for sheet in db.get_sheets(conn)):
+        return None
+    register(conn, config_path, opener)
+    spreadsheet_ids = {sheet["spreadsheet_id"] for sheet in db.get_sheets(conn) if sheet["config"] == config_path}
+    return sum(db.enable_spreadsheet(conn, spreadsheet_id) for spreadsheet_id in spreadsheet_ids)
+
+
 def live_tab(
     conn, sheet_id: int, rows: list[Row], snapshot_at, spreadsheet_name: str, tab_title: str, settings: dict
 ) -> None:
@@ -350,6 +362,8 @@ def main() -> None:
     commands = parser.add_subparsers(dest="command", required=True)
     register_parser = commands.add_parser("register", help="add a config's tabs, all off")
     register_parser.add_argument("configs", nargs="+")
+    add_parser = commands.add_parser("add", help="register and turn on each config not on the queue yet, for a deploy")
+    add_parser.add_argument("configs", nargs="+")
     run_parser = commands.add_parser("run", help="sync every registered tab that's on")
     run_parser.add_argument("--once", action="store_true", help="one pass, then exit")
     for command, help_text in (
@@ -372,6 +386,16 @@ def main() -> None:
             logger.warning("Keep cron off and the coordinator running, then run this again")
         else:
             logger.success("Cron can go back on")
+        return
+
+    if args.command == "add":
+        with db.connect() as conn:
+            for config_path in args.configs:
+                tabs = add(conn, config_path)
+                if tabs is None:
+                    logger.info(f"{config_path} is already on the queue")
+                else:
+                    logger.info(f"Added {config_path}: {tabs} tab(s) registered and on the queue")
         return
 
     if args.command == "register":

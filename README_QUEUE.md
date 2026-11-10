@@ -146,6 +146,8 @@ Before deploying, both scripts:
 - refuse to run if there are uncommitted changes (including untracked files) or commits that haven't been pushed to `origin/main`, because the VMs pull from GitHub;
 - copy the sheet configs listed in `CONFIGS` from your local `secrets/` to the coordinator and every worker. The coordinator writes cells using its copy's column names, and the workers archive with theirs, so a stale copy silently drops new columns. When you add a sheet, add its config to `CONFIGS` in **both** scripts.
 
+**Adding a sheet.** Add its config to `CONFIGS` in both scripts, commit and push, then deploy the coordinator and the workers. At the end of its deploy, the coordinator runs `sync add` on `CONFIGS`: a config that isn't on the queue yet is registered and all its tabs are turned on, so new rows are queued within about 15 seconds. Every row with a URL and a blank status is queued at once. A config already on the queue is left as it is, even if its tabs are off (eg after a `rollback`), so a deploy never turns a sheet back on. Turn off any cron line for the sheet before deploying.
+
 Service accounts, cookies and sessions are not copied automatically. If you deploy by hand, the configs aren't copied either, so copy any that have changed.
 
 Both scripts install Python packages exactly as pinned in the committed `poetry.lock`. To update packages, run `poetry update` on your own machine, run the tests, then commit and push the lock file. Never run `poetry update` on a VM: it changes `poetry.lock` there, and the next deploy's `git pull` then fails.

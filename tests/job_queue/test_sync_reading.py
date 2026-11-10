@@ -52,6 +52,19 @@ def test_register_adds_tabs_switched_off(conn, config):
     ]
 
 
+def test_add_registers_a_new_config_and_turns_it_on(conn, config):
+    sheet = FakeSpreadsheet([tab_of(gid=1), tab_of(gid=2, title="Tab 2")])
+    assert sync.add(conn, CONFIG, opener_for(sheet)) == 2
+    assert [(s["worksheet"], s["enabled"]) for s in db.get_sheets(conn)] == [("Tab 1", True), ("Tab 2", True)]
+
+
+def test_add_leaves_a_config_already_on_the_queue_as_it_is(conn, config):
+    sheet = FakeSpreadsheet([tab_of()])
+    sync.register(conn, CONFIG, opener_for(sheet))  # off, eg after a rollback
+    assert sync.add(conn, CONFIG, opener_for(sheet)) is None
+    assert [s["enabled"] for s in db.get_sheets(conn)] == [False]
+
+
 def test_register_twice_changes_nothing(conn, config):
     sheet = FakeSpreadsheet([tab_of()])
     setup_sheet(conn, sheet)

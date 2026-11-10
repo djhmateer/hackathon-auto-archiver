@@ -1,5 +1,6 @@
 #!/bin/bash
 # Deploys main to the coordinator VM over SSH: stop, pull, sync, back up the database, migrate, start.
+# Then registers and turns on any config in CONFIGS that isn't on the queue yet.
 # Also makes sure the nightly database backup (backup-db.sh) and the morning report (job_queue/report.py) are in the
 # coordinator's crontab.
 # Also copies the alert email settings (POSTMARK_API_TOKEN, POSTMARK_FROM_EMAIL, ALERT_EMAIL_TO) from your .env.
@@ -61,7 +62,7 @@ chmod 600 .env.new
 mv .env.new .env
 echo "   its .env now has: $(grep -oE "^[A-Z_]+" .env | tr "\n" " ")"'
 
-ssh -p "$PORT" "$HOST" RESET=$RESET bash -s <<'REMOTE'
+ssh -p "$PORT" "$HOST" RESET=$RESET CONFIGS="'$CONFIGS'" bash -s <<'REMOTE'
 set -euo pipefail
 export PATH="$HOME/.local/bin:$PATH"
 cd /home/dave/auto-archiver
@@ -115,4 +116,8 @@ sudo systemctl start aa-coordinator
 sleep 10
 systemctl is-active aa-coordinator
 journalctl -u aa-coordinator -n 20 --no-pager
+
+# DM 10th Nov 26 - a config new to CONFIGS goes straight on the queue. One already there, even if off, is left alone
+echo "== Adding any new config to the queue"
+poetry run python -m auto_archiver.job_queue.sync add $CONFIGS
 REMOTE
