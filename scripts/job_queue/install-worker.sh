@@ -132,8 +132,9 @@ grep -qxF "$alias_line" "$HOME/.bash_aliases" || echo "$alias_line" >> "$HOME/.b
 cat <<DONE
 
 Done. The service is enabled, so it starts by itself on the reboot. Still to do by hand, in this order:
-  1. Copy into $REPO/secrets/ every config the queue runs, with its service accounts, cookies, sessions and profiles.
-     Do this before rebooting: without the configs every job fails in setup
+  1. Get the configs, cookies, sessions and profile: on your machine, add this VM's SSH port to PORTS in
+     scripts/job_queue/deploy-workers.sh and to the config loop in deploy-coordinator.sh, commit, push and run
+     deploy-workers.sh. Do this before rebooting: without the configs every job fails in setup
   2. Check the versions look right:
        firefox --version; geckodriver --version; google-chrome --version; deno --version
   3. Reboot, so the docker group and the freed crash dump memory apply. The worker starts by itself:

@@ -126,10 +126,10 @@ It then checks that it can reach Postgres. If that check fails and the worker is
 
 The script enables the `aa-worker-supervisor` service but doesn't start it. Then, in this order:
 
-1. **Copy the secrets.** Copy into `secrets/` every config the queue runs, with its service accounts, cookies, sessions and browser profiles, at the same paths as on the coordinator. Do this before rebooting. The service starts by itself on boot, and without the configs every job fails in setup.
+1. **Copy the secrets.** Add the worker's SSH port to `PORTS` in `scripts/job_queue/deploy-workers.sh` (and to the config-copy loop in `deploy-coordinator.sh`), commit, push and run `deploy-workers.sh`. It copies the sheet configs and the files in its `SECRETS` list (cookies, sessions and browser profile) to every worker, then starts the service. Do this before rebooting. The service starts by itself on boot, and without the configs every job fails in setup.
 2. **Reboot** with `sudo reboot`. This applies the `docker` group membership and frees the 512 MB of memory that was reserved for crash dumps (the script removes `kdump-tools`).
 3. **Check the log** with `j`, an alias for `journalctl -u aa-worker-supervisor -f`. Look for `Started worker <worker_name>, … daily reboot at 05:20`, followed by `Waiting for jobs: …`. The coordinator logs `Worker <worker_name> is up`.
-4. **Add the worker to the deploy scripts.** Add its SSH port to `PORTS` in `scripts/job_queue/deploy-workers.sh`, so that deploys reach it. Also add it to the `for CONFIG_PORT in …` loop in both deploy scripts, so that it receives the sheet configs.
+4. **Add the worker to `update-os.sh`**, so OS updates reach it.
 
 Notes:
 
@@ -148,7 +148,7 @@ Before deploying, both scripts:
 
 **Adding a sheet.** Add its config to `CONFIGS` in both scripts, commit and push, then deploy the coordinator and the workers. At the end of its deploy, the coordinator runs `sync add` on `CONFIGS`: a config that isn't on the queue yet is registered and all its tabs are turned on, so new rows are queued within about 15 seconds. Every row with a URL and a blank status is queued at once. A config already on the queue is left as it is, even if its tabs are off (eg after a `rollback`), so a deploy never turns a sheet back on. Turn off any cron line for the sheet before deploying.
 
-Service accounts, cookies and sessions are not copied automatically. If you deploy by hand, the configs aren't copied either, so copy any that have changed.
+`deploy-workers.sh` also copies the archiver's cookies, sessions and browser profile (its `SECRETS` list) to every worker, from your local `secrets/`, which is the master copy. It uses `rsync`, so only files that changed are sent. To add a file the archiver needs, add it to `SECRETS`. Service accounts are not copied, as only the coordinator uses them. If you deploy by hand, nothing is copied, so copy any files that have changed.
 
 Both scripts install Python packages exactly as pinned in the committed `poetry.lock`. To update packages, run `poetry update` on your own machine, run the tests, then commit and push the lock file. Never run `poetry update` on a VM: it changes `poetry.lock` there, and the next deploy's `git pull` then fails.
 

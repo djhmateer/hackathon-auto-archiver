@@ -2,6 +2,7 @@
 # Deploys main to the worker VMs over SSH. First stops every worker, killing its running job. Then, one worker at a
 # time: pull, sync, put its killed job back on the queue (without using up an attempt), update the docker images and
 # restart bgutil-provider, start. A killed job is retried as soon as a worker is back, and only on a deployed one.
+# Before that, copies the sheet configs (to the coordinator too) and the archiver's cookies, sessions and profile.
 # Packages come from the committed poetry.lock: run poetry update locally, test and push, never on the VMs.
 # Deploy the coordinator first if there's a new migration, as workers don't migrate.
 #
@@ -10,7 +11,7 @@
 set -euo pipefail
 
 HOST=192.168.1.212
-PORTS="341 342"     # glanworker1, glanworker2
+PORTS="341 342 343"     # glanworker1, glanworker2, testworker1
 
 # The workers pull from GitHub, so refuse to deploy anything that isn't committed and pushed
 cd "$(dirname "$0")/../.."
@@ -29,9 +30,18 @@ fi
 # secrets/ isn't in git. The coordinator writes the sheet cells using its copy's columns, and the workers archive with
 # theirs, so copy them to all three whichever script is run (DM 4th Nov 26 - a stale coordinator copy dropped new columns)
 CONFIGS="secrets/orchestration-aa-dave-testing.yaml secrets/orchestration-aa-clienta.yaml secrets/orchestration-aa-clientb.yaml secrets/orchestration-glan-sheet1.yaml secrets/orchestration-glan-sheet4.yaml"
-for CONFIG_PORT in 340 341 342; do
+for CONFIG_PORT in 340 $PORTS; do
     echo "== Copying $CONFIGS to $HOST port $CONFIG_PORT"
     scp -q -P "$CONFIG_PORT" $CONFIGS "$HOST:/home/dave/auto-archiver/secrets/"
+done
+
+# DM 10th Nov 26 - the cookies, sessions and browser profile the archiver uses, so a refreshed cookie or a new worker
+# gets them from your local secrets/, which is the master copy (the workers never change them). rsync only sends a file
+# whose size or time differs, so the 150 MB profile isn't sent every deploy. The workers don't need the service accounts
+SECRETS="secrets/anon.session secrets/profile.tar.gz secrets/www.facebook.com_cookies.txt secrets/x.com_cookies.txt"
+for SECRETS_PORT in $PORTS; do
+    echo "== Copying any changed secrets to $HOST port $SECRETS_PORT"
+    rsync -tp --itemize-changes -e "ssh -p $SECRETS_PORT" $SECRETS "$HOST:/home/dave/auto-archiver/secrets/"
 done
 
 # all of them first, so a job put back on the queue can't be claimed by a worker that's about to be stopped
