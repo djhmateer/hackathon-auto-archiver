@@ -312,15 +312,14 @@ def storage(conn) -> list[str]:
     lines = [line]
     tabs = conn.execute(
         """
-        SELECT s.spreadsheet_name, s.worksheet, coalesce(t.files, 0) AS files, coalesce(t.bytes, 0) AS bytes
-        FROM sheets s LEFT JOIN (
+        SELECT s.spreadsheet_name, s.worksheet, t.files, t.bytes
+        FROM sheets s JOIN (
             SELECT j.sheet_id, count(*) AS files, sum(f.bytes) AS bytes
             FROM job_files f JOIN jobs j ON j.id = f.job_id
             WHERE f.created_at > now() - interval '1 day' GROUP BY j.sheet_id
         ) t ON t.sheet_id = s.id
-        -- every tab that's on, even with nothing stored, and any that's off but stored something
-        WHERE s.enabled OR t.sheet_id IS NOT NULL
-        ORDER BY bytes DESC, s.id
+        -- only the tabs that stored something, as there are too many to list them all
+        ORDER BY t.bytes DESC, s.id
         """
     ).fetchall()
     for row in tabs:

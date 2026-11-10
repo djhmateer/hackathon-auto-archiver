@@ -413,12 +413,9 @@ def test_storage_totals_files_and_flags_failures(conn):
     assert lines[2].split() == ["Sheet", "A/tab1", "2", "files", "2.00", "GB"]
 
 
-def test_storage_lists_every_tab_that_is_on_even_with_nothing_stored(conn):
+def test_storage_leaves_out_tabs_with_nothing_stored(conn):
     add_sheet(conn, gid=1)
-    add_sheet(conn, gid=2, enabled=False)
-    lines = dashboard.storage(conn)
-    assert len(lines) == 2  # the tab that's off isn't listed
-    assert lines[1].split() == ["Sheet", "A/tab1", "0", "files", "0.00", "GB"]
+    assert len(dashboard.storage(conn)) == 1  # only the totals line
 
 
 def test_failures_lists_only_failed_and_blocked_jobs(conn):
