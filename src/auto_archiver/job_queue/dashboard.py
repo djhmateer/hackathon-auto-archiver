@@ -19,7 +19,8 @@ BACKUP_DIR = Path.home() / "backups"
 BACKUP_LATE_SECONDS = 26 * 60 * 60  # nightly, plus some slack
 RECENT_JOBS = 5
 WAITING_JOBS = 10
-TAB_WIDTH = 30
+TAB_WIDTH = 40
+SHEET_MIN = 10  # the fewest characters of a spreadsheet's name a cut tab name keeps
 FAILURES = 5
 SITES = 10
 READ_LATE_SECONDS = 60  # sync reads every tab that's on every SYNC_SECONDS
@@ -80,6 +81,23 @@ def machine(stats: dict) -> str:
 def tab(row) -> str:
     """eg ClientA/Sheet1, shorter than db.describe_tab() to fit more on a line"""
     return f"{row['spreadsheet_name']}/{row['worksheet']}" if row["spreadsheet_name"] else row["worksheet"]
+
+
+def tab_column(row) -> str:
+    """
+    tab(), cut to TAB_WIDTH for a column. First the end of the spreadsheet's name, as the tab's name is what tells a
+    spreadsheet's tabs apart, then the middle, which keeps both ends. eg Indigo Datasheet - Israel…/Archiving_SAT
+    """
+    name = tab(row)
+    sheet, worksheet = row["spreadsheet_name"], row["worksheet"]
+    if len(name) > TAB_WIDTH and sheet:
+        room = max(SHEET_MIN, TAB_WIDTH - len(worksheet) - 1)
+        if room < len(sheet):
+            name = f"{sheet[: room - 1]}…/{worksheet}"
+    if len(name) > TAB_WIDTH:
+        head = (TAB_WIDTH - 1) // 2
+        name = name[:head] + "…" + name[-(TAB_WIDTH - 1 - head) :]
+    return name
 
 
 def heartbeat(seconds_ago: int) -> str:
@@ -217,7 +235,7 @@ def sheets(conn) -> list[str]:
             state = colour(GREEN, "on")
         else:
             state = colour(DIM, "off")
-        name = tab(row)
+        name = tab_column(row)
         # with no organisation, its jobs are never claimed
         pool = colour(DIM if row["pool"] else RED, (row["pool"] or "none").ljust(POOL_WIDTH))
         done = colour(GREEN, str(row["done"]).rjust(6))
@@ -306,7 +324,7 @@ def storage(conn) -> list[str]:
         """
     ).fetchall()
     for row in tabs:
-        lines.append(f"  {tab(row)[:TAB_WIDTH]:<{TAB_WIDTH}} {row['files']:>6} files {row['bytes'] / GB:>7.2f} GB")
+        lines.append(f"  {tab_column(row):<{TAB_WIDTH}} {row['files']:>6} files {row['bytes'] / GB:>7.2f} GB")
     return lines
 
 

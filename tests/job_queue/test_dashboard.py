@@ -429,3 +429,28 @@ def test_failures_lists_only_failed_and_blocked_jobs(conn):
     screen = "\n".join(dashboard.failures(conn))
     assert "site1.com" not in screen
     assert "row 3 site2.com" in screen and "row 4 site3.com" in screen
+
+
+def test_long_tab_names_are_cut_to_the_column(conn):
+    def cut(sheet, worksheet):
+        return dashboard.tab_column({"spreadsheet_name": sheet, "worksheet": worksheet})
+
+    assert cut("ClientA", "Sheet1") == "ClientA/Sheet1"
+    # the spreadsheet's name is cut first, keeping the tab's
+    assert cut("Spreadsheet with a very long name indeed", "Tab_SAT") == "Spreadsheet with a very long na…/Tab_SAT"
+    # then the middle, keeping both ends, so two long tabs of one spreadsheet still differ
+    first = cut("Spreadsheet with a long name", "Entries of the archive")
+    second = cut("Spreadsheet with a long name", "Entries of the archive - older entries")
+    assert len(first) == len(second) == dashboard.TAB_WIDTH
+    assert first != second
+    assert second.endswith("older entries")
+
+    # every column lines up however long the name
+    sheet_id = add_sheet(conn)
+    conn.execute(
+        "UPDATE sheets SET spreadsheet_name = %s, worksheet = %s WHERE id = %s",
+        ("Spreadsheet with a long name", "Entries of the archive - older entries", sheet_id),
+    )
+    header, row = [line for line in dashboard.sheets(conn) if "pool" in line or "older" in line]
+    plain = re.compile(r"\x1b\[[0-9;]*m")
+    assert plain.sub("", row).index(" hms ") == plain.sub("", header).index(" pool ")
