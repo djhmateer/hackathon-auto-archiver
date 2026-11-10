@@ -262,11 +262,7 @@ class WorkerSupervisor:
         cleanup requeues it first, after a long outage, it gets one more attempt instead of failing. That's acceptable
         """
         running = self.running
-        if (
-            running is not None
-            and running.kill_reason is None
-            and self.clock() - running.started > TIME_LIMIT_SECONDS
-        ):
+        if running is not None and running.kill_reason is None and self.clock() - running.started > TIME_LIMIT_SECONDS:
             logger.error(f"Job {running.job['id']} hit the time limit, killing it")
             running.kill_reason = f"- still running after {TIME_LIMIT_SECONDS // 60} minutes, killed"
             self._kill_child()
@@ -378,11 +374,21 @@ class WorkerSupervisor:
 
     def _claim(self, conn) -> None:
         job = db.claim_job(conn, self.worker, self.git_commit)
+        if job is None and db.worker_pool(conn, self.worker) is None:
+            message = (
+                f"Worker {self.worker} isn't in a pool, so it claims nothing. On the coordinator: "
+                f"INSERT INTO workers (name, pool) VALUES ('{self.worker}', '<pool>')"
+            )
+            if message != self.idle_logged:
+                logger.warning(message)
+                self.idle_logged = message
+            return
         if job is None:
             counts = db.count_active_jobs(conn)
-            # queued jobs it can't claim are waiting for their site, a retry, or a paused or disabled sheet
+            # queued jobs it can't claim are another pool's, or waiting for their site, a retry, or a paused or
+            # disabled sheet
             why = (
-                " (waiting for their site to be free, a retry, or a paused or disabled sheet)"
+                " (another pool's, or waiting for their site to be free, a retry, or a paused or disabled sheet)"
                 if counts["queued"]
                 else ""
             )

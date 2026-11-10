@@ -26,9 +26,7 @@ def set_stage(step: str, progress: str = "") -> None:
         return
     stage = f"{step}: {progress}" if progress else step
     try:
-        with psycopg.connect(
-            db.database_url(), autocommit=True, row_factory=dict_row, connect_timeout=5
-        ) as conn:
+        with psycopg.connect(db.database_url(), autocommit=True, row_factory=dict_row, connect_timeout=5) as conn:
             if step == _step:
                 db.set_stage_progress(conn, int(job_id), stage)
             else:

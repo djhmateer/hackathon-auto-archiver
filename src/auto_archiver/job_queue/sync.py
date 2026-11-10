@@ -396,6 +396,11 @@ def main() -> None:
                     logger.info(f"{config_path} is already on the queue")
                 else:
                     logger.info(f"Added {config_path}: {tabs} tab(s) registered and on the queue")
+                    # a new spreadsheet has no organisation, so no pool: its jobs wait until it's set
+                    logger.warning(
+                        f"Set its organisation, or no worker claims its jobs. On the coordinator: UPDATE sheets "
+                        f"SET organisation_id = <id from organisations> WHERE config = '{config_path}'"
+                    )
         return
 
     if args.command == "register":

@@ -84,6 +84,66 @@ def test_claim_returns_none_with_nothing_to_do(conn):
     assert db.claim_job(conn, "vm1") is None
 
 
+def test_a_worker_only_claims_from_its_own_pool(conn):
+    glan = conn.execute("INSERT INTO organisations (name, pool) VALUES ('Org G', 'glan') RETURNING id").fetchone()["id"]
+    glan_sheet = add_sheet(conn, gid=2)
+    conn.execute("UPDATE sheets SET organisation_id = %s WHERE id = %s", (glan, glan_sheet))
+    glan_job = add_job(conn, glan_sheet)
+    test_job = add_job(conn, add_sheet(conn, gid=1), row=3)
+    conn.execute("INSERT INTO workers (name, pool) VALUES ('g1', 'glan')")
+
+    assert db.claim_job(conn, "vm1")["id"] == test_job  # test pool, so not the older glan job
+    assert db.claim_job(conn, "vm2") is None
+    assert db.claim_job(conn, "g1")["id"] == glan_job
+
+
+def test_a_site_busy_in_another_pool_still_waits(conn):
+    # one job per site across the whole server, so a glan job on a site holds back a test job on it
+    glan = conn.execute("INSERT INTO organisations (name, pool) VALUES ('Org G', 'glan') RETURNING id").fetchone()["id"]
+    glan_sheet = add_sheet(conn, gid=2)
+    conn.execute("UPDATE sheets SET organisation_id = %s WHERE id = %s", (glan, glan_sheet))
+    add_job(conn, glan_sheet, domain="site1.com")
+    add_job(conn, add_sheet(conn, gid=1), row=3, domain="site1.com")
+    conn.execute("INSERT INTO workers (name, pool) VALUES ('g1', 'glan')")
+
+    assert db.claim_job(conn, "g1") is not None
+    assert db.claim_job(conn, "vm1") is None
+
+
+def test_a_new_tab_gets_its_spreadsheets_organisation(conn):
+    org = conn.execute("INSERT INTO organisations (name, pool) VALUES ('Org G', 'glan') RETURNING id").fetchone()["id"]
+    # the tests' default organisation would hide a tab added with none
+    conn.execute("ALTER TABLE sheets ALTER COLUMN organisation_id DROP DEFAULT")
+    try:
+        db.save_tab(conn, "spreadsheet1", 1, "Tab 1", "config.yaml")
+        db.save_tab(conn, "other", 1, "Tab 1", "other.yaml")
+        conn.execute("UPDATE sheets SET organisation_id = %s WHERE spreadsheet_id = 'spreadsheet1'", (org,))
+        db.save_tab(conn, "spreadsheet1", 2, "Tab 2", "config.yaml")
+        db.save_tab(conn, "other", 2, "Tab 2", "other.yaml")
+    finally:
+        conn.execute("ALTER TABLE sheets ALTER COLUMN organisation_id SET DEFAULT 1")
+    rows = conn.execute("SELECT spreadsheet_id, worksheet_gid, organisation_id FROM sheets ORDER BY id").fetchall()
+    assert [(r["spreadsheet_id"], r["worksheet_gid"], r["organisation_id"]) for r in rows] == [
+        ("spreadsheet1", 1, org),
+        ("other", 1, None),
+        ("spreadsheet1", 2, org),
+        ("other", 2, None),  # a spreadsheet with no organisation still has none
+    ]
+
+
+def test_a_worker_with_no_pool_claims_nothing(conn):
+    add_job(conn, add_sheet(conn))
+    assert db.worker_pool(conn, "new-vm") is None
+    assert db.claim_job(conn, "new-vm") is None
+
+
+def test_a_sheet_with_no_organisation_is_never_claimed(conn):
+    sheet_id = add_sheet(conn)
+    conn.execute("UPDATE sheets SET organisation_id = NULL WHERE id = %s", (sheet_id,))
+    add_job(conn, sheet_id)
+    assert db.claim_job(conn, "vm1") is None
+
+
 def test_claim_sets_the_lease_and_returns_the_config(conn):
     job_id = add_job(conn, add_sheet(conn))
     claimed = db.claim_job(conn, "vm1")

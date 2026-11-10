@@ -122,6 +122,14 @@ def test_one_job_runs_at_a_time_and_the_rest_wait(conn, make_supervisor, childre
     assert conn.execute("SELECT count(*) AS n FROM jobs WHERE status = 'queued'").fetchone()["n"] == 2
 
 
+def test_a_worker_with_no_pool_says_so_once(conn, make_supervisor, clock, caplog):
+    sup = make_supervisor(worker="new-vm")
+    sup.tick(conn)
+    clock.now += 600
+    sup.tick(conn)
+    assert caplog.text.count("Worker new-vm isn't in a pool, so it claims nothing") == 1
+
+
 def test_idle_line_is_only_logged_when_it_changes(conn, make_supervisor, clock, caplog):
     sup = make_supervisor()
     sup.tick(conn)
@@ -133,7 +141,10 @@ def test_idle_line_is_only_logged_when_it_changes(conn, make_supervisor, clock, 
     add_job(conn, add_sheet(conn))
     conn.execute("UPDATE jobs SET available_at = now() + interval '1 hour'")
     sup.tick(conn)
-    assert "1 queued (waiting for their site to be free, a retry, or a paused or disabled sheet)" in caplog.text
+    assert (
+        "1 queued (another pool's, or waiting for their site to be free, a retry, or a paused or disabled sheet)"
+        in caplog.text
+    )
 
 
 def test_going_idle_again_after_a_job_is_logged(conn, make_supervisor, children, caplog):

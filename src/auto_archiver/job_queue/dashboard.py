@@ -25,6 +25,7 @@ SITES = 10
 READ_LATE_SECONDS = 60  # sync reads every tab that's on every SYNC_SECONDS
 QUEUED_LONG_SECONDS = 60 * 60
 WORKER_WIDTH = 12  # eg glanworker1
+POOL_WIDTH = 5  # eg glan
 INDENT = " " * (WORKER_WIDTH + 3)  # lines under a worker's first line
 GB, MB = 1024**3, 1024**2
 DISK_LOW, DISK_VERY_LOW = 10 * GB, 5 * GB
@@ -156,8 +157,9 @@ def workers(conn, coordinator_commit: str) -> list[str]:
         else:
             # a worker that missed a deploy runs different code from the coordinator
             code = colour(GREEN if beat["git_commit"] == coordinator_commit else RED, beat["git_commit"])
+        pool = colour(GREEN, beat["pool"]) if beat["pool"] else colour(RED, "none, so it claims nothing")
         lines.append(
-            f"  {name:<{WORKER_WIDTH}} heartbeat {heartbeat(beat['seconds_ago'])}, code {code}, "
+            f"  {name:<{WORKER_WIDTH}} heartbeat {heartbeat(beat['seconds_ago'])}, pool {pool}, code {code}, "
             f"today {colour(GREEN, counts['done'])} done, {failed} failed"
         )
         lines.append(f"{INDENT}{machine(beat)}")
@@ -191,20 +193,21 @@ def sheets(conn) -> list[str]:
         ),
         colour(
             DIM,
-            f"  {'':<{TAB_WIDTH}} {'queued':>6} {'running':>7} {'done':>6} {'failed':>6} {'rows':>6} {'blank':>6}"
+            f"  {'':<{TAB_WIDTH}} {'pool':<{POOL_WIDTH}} {'queued':>6} {'running':>7} {'done':>6} {'failed':>6}"
+            f" {'rows':>6} {'blank':>6}"
             f"   {'last read':<9}",
         ),
     ]
     rows = conn.execute(
         """
-        SELECT s.spreadsheet_name, s.worksheet, s.enabled, s.paused_until > now() AS paused, s.paused_until,
+        SELECT s.spreadsheet_name, s.worksheet, s.enabled, s.paused_until > now() AS paused, s.paused_until, o.pool,
             s.url_rows, s.blank_rows, extract(epoch FROM now() - s.last_read_at)::int AS read_seconds_ago,
             count(j.id) FILTER (WHERE j.status = 'queued') AS queued,
             count(j.id) FILTER (WHERE j.status = 'running') AS running,
             count(j.id) FILTER (WHERE j.status = 'done' AND j.finished_at > now() - interval '1 day') AS done,
             count(j.id) FILTER (WHERE j.status = 'failed' AND j.finished_at > now() - interval '1 day') AS failed
-        FROM sheets s LEFT JOIN jobs j ON j.sheet_id = s.id
-        GROUP BY s.id ORDER BY s.enabled DESC, s.id
+        FROM sheets s LEFT JOIN jobs j ON j.sheet_id = s.id LEFT JOIN organisations o ON o.id = s.organisation_id
+        GROUP BY s.id, o.pool ORDER BY s.enabled DESC, o.pool, s.id
         """
     ).fetchall()
     for row in rows:
@@ -215,6 +218,8 @@ def sheets(conn) -> list[str]:
         else:
             state = colour(DIM, "off")
         name = tab(row)
+        # with no organisation, its jobs are never claimed
+        pool = colour(DIM if row["pool"] else RED, (row["pool"] or "none").ljust(POOL_WIDTH))
         done = colour(GREEN, str(row["done"]).rjust(6))
         failed = colour(YELLOW if row["failed"] else GREEN, str(row["failed"]).rjust(6))
         url_rows = "" if row["url_rows"] is None else row["url_rows"]
@@ -230,7 +235,8 @@ def sheets(conn) -> list[str]:
             read_colour = GREEN
         read = colour(read_colour, read.ljust(9))
         lines.append(
-            f"  {name:<{TAB_WIDTH}} {row['queued']:>6} {row['running']:>7} {done} {failed} {url_rows:>6} {blank_rows:>6}"
+            f"  {name:<{TAB_WIDTH}} {pool} {row['queued']:>6} {row['running']:>7} {done} {failed}"
+            f" {url_rows:>6} {blank_rows:>6}"
             f"   {read} {state}"
         )
     return lines
@@ -288,10 +294,15 @@ def storage(conn) -> list[str]:
     lines = [line]
     tabs = conn.execute(
         """
-        SELECT s.spreadsheet_name, s.worksheet, count(*) AS files, coalesce(sum(f.bytes), 0) AS bytes
-        FROM job_files f JOIN jobs j ON j.id = f.job_id JOIN sheets s ON s.id = j.sheet_id
-        WHERE f.created_at > now() - interval '1 day'
-        GROUP BY s.id ORDER BY bytes DESC
+        SELECT s.spreadsheet_name, s.worksheet, coalesce(t.files, 0) AS files, coalesce(t.bytes, 0) AS bytes
+        FROM sheets s LEFT JOIN (
+            SELECT j.sheet_id, count(*) AS files, sum(f.bytes) AS bytes
+            FROM job_files f JOIN jobs j ON j.id = f.job_id
+            WHERE f.created_at > now() - interval '1 day' GROUP BY j.sheet_id
+        ) t ON t.sheet_id = s.id
+        -- every tab that's on, even with nothing stored, and any that's off but stored something
+        WHERE s.enabled OR t.sheet_id IS NOT NULL
+        ORDER BY bytes DESC, s.id
         """
     ).fetchall()
     for row in tabs:
@@ -346,6 +357,9 @@ def waiting(conn) -> list[str]:
         SELECT j.id, j.row_number, j.domain, j.attempts, j.available_at, s.spreadsheet_name, s.worksheet,
             CASE
                 WHEN NOT s.enabled THEN 'sheet is off'
+                WHEN s.organisation_id IS NULL THEN 'sheet has no organisation, so no pool'
+                WHEN NOT EXISTS (SELECT 1 FROM organisations o JOIN workers w ON w.pool = o.pool
+                                 WHERE o.id = s.organisation_id) THEN 'no worker in its pool'
                 WHEN s.paused_until > now() THEN 'sheet is paused'
                 WHEN j.available_at > now() THEN 'retry'
                 WHEN EXISTS (SELECT 1 FROM jobs b WHERE b.domain = j.domain AND b.status = 'running')

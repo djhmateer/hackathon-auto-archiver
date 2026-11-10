@@ -144,8 +144,9 @@ def test_each_step_is_timed_and_progress_does_not_start_a_new_one(conn, monkeypa
     set_stage("instagram_api_extractor")
     conn.execute("UPDATE jobs SET stage_at = now() - interval '10 minutes' WHERE id = %s", (job["id"],))
     set_stage("instagram_api_extractor", "posts 30, 50 of 1000 limit")
-    row = conn.execute("SELECT stage, now() - stage_at > interval '9 minutes' AS kept FROM jobs WHERE id = %s",
-                       (job["id"],)).fetchone()
+    row = conn.execute(
+        "SELECT stage, now() - stage_at > interval '9 minutes' AS kept FROM jobs WHERE id = %s", (job["id"],)
+    ).fetchone()
     assert row["stage"] == "instagram_api_extractor: posts 30, 50 of 1000 limit"
     assert row["kept"]  # still timed from the step's start
     set_stage("storing", "media 1 of 10")
@@ -231,6 +232,28 @@ def test_waiting_jobs_say_why(conn):
     assert "free.com" not in screen
 
 
+def test_waiting_jobs_with_no_organisation_or_pool_worker_say_so(conn):
+    no_org = add_sheet(conn, gid=1)
+    conn.execute("UPDATE sheets SET organisation_id = NULL WHERE id = %s", (no_org,))
+    cir = conn.execute("INSERT INTO organisations (name, pool) VALUES ('Org C', 'cir') RETURNING id").fetchone()["id"]
+    no_worker = add_sheet(conn, gid=2)
+    conn.execute("UPDATE sheets SET organisation_id = %s WHERE id = %s", (cir, no_worker))
+    add_job(conn, no_org, 2, "site1.com")
+    add_job(conn, no_worker, 3, "site2.com")
+    screen = "\n".join(dashboard.waiting(conn))
+    assert "row 2 site1.com: " + YELLOW + "sheet has no organisation, so no pool" in screen
+    assert "row 3 site2.com: " + YELLOW + "no worker in its pool" in screen
+    sheets = "\n".join(dashboard.sheets(conn))
+    assert RED + "none " in sheets  # the sheet with no organisation
+    assert "cir  " in sheets
+
+
+def test_a_worker_with_no_pool_is_red(conn):
+    db.beat(conn, "worker-supervisor-new-vm")
+    screen = "\n".join(dashboard.workers(conn, "abc1234"))
+    assert "pool " + RED + "none, so it claims nothing" in screen
+
+
 def test_alerts_show_unsent_in_red_and_only_the_first_line(conn):
     db.add_alert(conn, "site_blocked", "site1.com blocked tab tab1 row 2\n\nURL: https://site1.com/post/2")
     db.add_alert(conn, "sheet_paused", "Sheet paused")
@@ -290,7 +313,10 @@ def test_a_worker_shows_its_code_and_machine(conn):
     assert f"code {GREEN}abc1234" in screen
     assert f"code {RED}old5678" in screen  # missed a deploy
     assert f"code {YELLOW}?" in screen
-    assert f"disk {GREEN}20.0 GB{dashboard.RESET} free, memory {GREEN}[█████░░░░░] 2.0 GB used, 2.0 GB{dashboard.RESET} available" in screen
+    assert (
+        f"disk {GREEN}20.0 GB{dashboard.RESET} free, memory {GREEN}[█████░░░░░] 2.0 GB used, 2.0 GB{dashboard.RESET} available"
+        in screen
+    )
     assert f"disk {RED}3.0 GB" in screen
     assert "cpu, disk, memory and swap ?" in screen
 
@@ -369,6 +395,14 @@ def test_storage_totals_files_and_flags_failures(conn):
     # a line per tab, biggest first
     assert lines[1].split() == ["Sheet", "A/tab2", "1", "files", "3.00", "GB"]
     assert lines[2].split() == ["Sheet", "A/tab1", "2", "files", "2.00", "GB"]
+
+
+def test_storage_lists_every_tab_that_is_on_even_with_nothing_stored(conn):
+    add_sheet(conn, gid=1)
+    add_sheet(conn, gid=2, enabled=False)
+    lines = dashboard.storage(conn)
+    assert len(lines) == 2  # the tab that's off isn't listed
+    assert lines[1].split() == ["Sheet", "A/tab1", "0", "files", "0.00", "GB"]
 
 
 def test_failures_lists_only_failed_and_blocked_jobs(conn):

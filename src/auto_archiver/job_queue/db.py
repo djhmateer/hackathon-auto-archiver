@@ -163,6 +163,14 @@ def save_tab(
             "name": spreadsheet_name,
         },
     )
+    # a new tab belongs to its spreadsheet's organisation, or its jobs would never be claimed
+    conn.execute(
+        """
+        UPDATE sheets SET organisation_id = (SELECT max(organisation_id) FROM sheets WHERE spreadsheet_id = %(id)s)
+        WHERE spreadsheet_id = %(id)s AND organisation_id IS NULL
+        """,
+        {"id": spreadsheet_id},
+    )
 
 
 def save_tab_read(conn: psycopg.Connection, sheet_id: int, url_rows: int, blank_rows: int) -> None:
@@ -240,9 +248,11 @@ def get_worker_heartbeats(conn: psycopg.Connection) -> list[dict]:
     """Each worker supervisor's name, how many seconds ago it last beat, and what it sent with the beat"""
     return conn.execute(
         f"""
-        SELECT substr(name, length('worker-supervisor-') + 1) AS worker,
-            extract(epoch FROM now() - beat_at)::int AS seconds_ago, git_commit, {", ".join(STAT_COLUMNS)}
-        FROM heartbeats WHERE name LIKE 'worker-supervisor-%' ORDER BY name
+        SELECT substr(h.name, length('worker-supervisor-') + 1) AS worker, w.pool,
+            extract(epoch FROM now() - h.beat_at)::int AS seconds_ago, h.git_commit,
+            {", ".join(f"h.{column}" for column in STAT_COLUMNS)}
+        FROM heartbeats h LEFT JOIN workers w ON w.name = substr(h.name, length('worker-supervisor-') + 1)
+        WHERE h.name LIKE 'worker-supervisor-%' ORDER BY w.pool, h.name
         """
     ).fetchall()
 
@@ -411,6 +421,12 @@ def discard_job_writes(conn: psycopg.Connection, job_id: int, message: str) -> N
         add_alert(conn, "writer_discarded", message)
 
 
+def worker_pool(conn: psycopg.Connection, worker: str) -> str | None:
+    """The worker's pool, or None if it isn't in the workers table, so claims nothing"""
+    row = conn.execute("SELECT pool FROM workers WHERE name = %s", (worker,)).fetchone()
+    return row["pool"] if row else None
+
+
 def count_active_jobs(conn: psycopg.Connection) -> dict:
     """How many jobs are queued and running, on every worker"""
     rows = conn.execute(
@@ -421,8 +437,8 @@ def count_active_jobs(conn: psycopg.Connection) -> dict:
 
 def claim_job(conn: psycopg.Connection, worker: str, git_commit: str = None) -> dict | None:
     """
-    Claims the next job, or returns None if there isn't one. The sheet with the fewest running jobs for its weight
-    goes first, then the oldest job.
+    Claims the next job, or returns None if there isn't one. Only from sheets whose organisation is in this worker's
+    pool (the workers table). The sheet with the fewest running jobs for its weight goes first, then the oldest job.
 
     Skips a job whose domain (its site, eg vimeo.com) already has a job running, so no site gets more than one at a
     time. The lock makes claims take turns, or two workers could each see the site free and both claim it.
@@ -445,13 +461,16 @@ def claim_job(conn: psycopg.Connection, worker: str, git_commit: str = None) -> 
                 WHERE j.status = 'queued' AND j.available_at <= now() AND s.enabled
                     AND (s.paused_until IS NULL OR s.paused_until <= now())
                     AND NOT EXISTS (SELECT 1 FROM jobs busy WHERE busy.domain = j.domain AND busy.status = 'running')
+                    AND s.organisation_id IN (
+                        SELECT o.id FROM organisations o JOIN workers w ON w.pool = o.pool WHERE w.name = %s
+                    )
                 ORDER BY (SELECT count(*) FROM jobs r WHERE r.sheet_id = j.sheet_id
                           AND r.status = 'running')::float / s.weight, j.id
                 FOR UPDATE OF j SKIP LOCKED LIMIT 1
             )
             RETURNING jobs.*, sheet.config, sheet.worksheet, sheet.spreadsheet_name
             """,
-            (worker, git_commit),
+            (worker, git_commit, worker),
         ).fetchone()
         if job is None:
             return None
