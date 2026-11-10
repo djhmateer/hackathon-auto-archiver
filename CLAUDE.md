@@ -50,7 +50,7 @@ New modules should follow the existing pattern:
   - `ssh 192.168.1.212 -p 340` - coordinator (Postgres job queue)
   - `ssh 192.168.1.212 -p 341` - glanworker1 (was worker41)
   - `ssh 192.168.1.212 -p 342` - glanworker2 (was worker42)
-  - `ssh 192.168.1.212 -p 343` - testworker1
+  - `ssh 192.168.1.212 -p 343` - hmsworker1 (was testworker1)
 - Never connect to any other production server or host. The old cron servers 11-15 are retired (Nov 2026).
 - On the pve3 VMs, read-only commands are fine (logs, `journalctl`, `df`, `SELECT`s). Anything that changes a VM
   (restarts, edits, installs, `INSERT`/`UPDATE`/`DELETE`) needs the user's go-ahead in that message; otherwise give
