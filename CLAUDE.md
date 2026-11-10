@@ -54,6 +54,7 @@ New modules should follow the existing pattern:
   - `ssh 192.168.1.212 -p 344` - hmsworker2
   - `ssh 192.168.1.212 -p 345` - cirworker1
   - `ssh 192.168.1.212 -p 346` - cirworker2
+  - `ssh 192.168.1.212 -p 347` - cirworker3
 - Never connect to any other production server or host. The old cron servers 11-15 are retired (Nov 2026).
 - On the pve3 VMs, read-only commands are fine (logs, `journalctl`, `df`, `SELECT`s). Anything that changes a VM
   (restarts, edits, installs, `INSERT`/`UPDATE`/`DELETE`) needs the user's go-ahead in that message; otherwise give
@@ -62,7 +63,7 @@ New modules should follow the existing pattern:
 ## Investigating Production Errors
 
 Production is the Postgres job queue on pve3 (see README_QUEUE.md): the coordinator syncs the sheets and writes
-results back, and the two workers each run one archiver job at a time. Server times are UTC; compare in UTC.
+results back, and the seven workers (in pools glan, hms and cir) each run one archiver job at a time. Server times are UTC; compare in UTC.
 
 Where to look, in this order:
 1. The queue database on the coordinator - every job, its attempts, worker, timings, error, sheet writes, files
@@ -73,7 +74,7 @@ Where to look, in this order:
      written), `job_files`, `admin_alerts`, `heartbeats`. The schema is in `src/auto_archiver/job_queue/migrations/`.
 2. The coordinator's log: `journalctl -u aa-coordinator` on 340 - each job queued, claimed and finished, workers
    going quiet, sheet writes, sync and alert email errors.
-3. A worker's logs, on 341 to 346 (from `jobs.worker`), in `~/auto-archiver/logs/`:
+3. A worker's logs, on 341 to 347 (from `jobs.worker`), in `~/auto-archiver/logs/`:
    - `1debug.log` (and rotated copies) - the archiver at DEBUG. Every line has the job id after the level, eg
      `| INFO     | job 92 | auto_archiver.core.orchestrator:feed:123 - ...`, so `grep "| job 92 |"` gives a whole job
    - `console/job_<id>.log` - the archiver's console output at ERROR, one header line per attempt: setup errors
