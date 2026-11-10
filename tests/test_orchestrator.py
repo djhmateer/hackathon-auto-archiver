@@ -1,6 +1,7 @@
 import os
 import pytest
 from argparse import ArgumentParser, ArgumentTypeError
+import requests
 from requests.exceptions import SSLError
 from auto_archiver.core.orchestrator import ArchivingOrchestrator
 from auto_archiver.version import __version__
@@ -456,6 +457,27 @@ def test_reachable_site_runs_all_modules(mocker):
     assert ran == ["generic_extractor", "wayback_extractor_enricher", "screenshot_enricher", "hash_enricher"]
     assert result.get_status_notes() == []
     connect.assert_not_called()
+
+
+@pytest.mark.parametrize("status, level", [(404, "WARNING"), (500, "ERROR")])
+def test_extractor_404_is_a_warning_other_failures_are_errors(mocker, caplog, status, level):
+    mocker.patch("socket.create_connection")
+    response = requests.Response()
+    response.status_code = status
+    extractor = mocker.Mock()
+    extractor.name = "instagram_api_extractor"
+    extractor.sanitize_url.side_effect = lambda u: u
+    extractor.download.side_effect = requests.HTTPError(f"{status} Client Error", response=response)
+
+    o = ArchivingOrchestrator()
+    o.config = {}
+    o.disconnect_vpn = mocker.Mock()
+    o.extractors, o.enrichers, o.databases, o.storages = [extractor], [], [], []
+    o.formatters = [mocker.Mock(format=mocker.Mock(return_value=None))]
+    o.archive(Metadata().set_url("https://example.com/page"))
+
+    [record] = [r for r in caplog.records if r.message.startswith("Extractor instagram_api_extractor")]
+    assert record.levelname == level
 
 
 def test_kill_still_exits_when_a_process_cant_be_killed(mocker):

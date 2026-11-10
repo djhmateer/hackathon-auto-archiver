@@ -253,6 +253,29 @@ class TestInstagramAPIExtractor(TestExtractorBase):
         assert result.is_success()
         assert "Error downloading stories for test_user" in result.metadata["errors"]
 
+    @pytest.mark.parametrize("status, level", [(404, "WARNING"), (500, "ERROR")])
+    def test_profile_section_404_is_a_warning_other_failures_are_errors(
+        self, metadata, mock_user_response, mocker, caplog, status, level
+    ):
+        response = requests.Response()
+        response.status_code = status
+        mocker.patch.object(self.extractor, "call_api", return_value=mock_user_response)
+        mocker.patch.object(self.extractor, "download_from_url", return_value=None)
+        mocker.patch.object(self.extractor, "_download_stories_reusable", return_value=[])
+        mocker.patch.object(self.extractor, "download_all_posts", return_value=0)
+        mocker.patch.object(self.extractor, "download_all_highlights", return_value=0)
+        mocker.patch.object(
+            self.extractor, "download_all_tagged", side_effect=requests.HTTPError(f"{status} Error", response=response)
+        )
+        self.extractor.full_profile = True
+
+        result = self.extractor.download_profile(metadata, "test_user")
+
+        assert result.is_success()
+        assert "Error downloading tagged posts for test_user" in result.get("errors")
+        [record] = [r for r in caplog.records if r.message.startswith("Error downloading tagged posts")]
+        assert record.levelname == level
+
     def test_carousel_item_failure_skips_only_that_item(self, mocker):
         """A carousel item whose video fails (eg a CDN 429) is skipped, the rest of the post is kept and noted"""
         post = {

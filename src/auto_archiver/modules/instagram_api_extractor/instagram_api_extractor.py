@@ -19,12 +19,19 @@ import traceback
 import requests
 from auto_archiver.utils.custom_logger import logger
 from retrying import retry
-from tqdm import tqdm
 
 from auto_archiver.core import Extractor
 from auto_archiver.core import Media
 from auto_archiver.core import Metadata
 from auto_archiver.job_queue.stage import set_stage
+
+
+# DM 10th Nov 26 - a hikerapi 404 is content that's gone, not a fault, so it shouldn't count as an error
+def _log_failure(message: str, e: Exception):
+    if isinstance(e, requests.HTTPError) and e.response is not None and e.response.status_code == 404:
+        logger.warning(f"{message}: {e}")
+    else:
+        logger.error(f"{message}: {e} {traceback.format_exc()}")
 
 
 class InstagramAPIExtractor(Extractor):
@@ -187,7 +194,7 @@ class InstagramAPIExtractor(Extractor):
                 self._set_profile_stage("stories", len(stories), self.full_profile_max_posts)
             except Exception as e:
                 result.append("errors", f"Error downloading stories for {username}")
-                logger.error(f"Error downloading stories for {username}: {e} {traceback.format_exc()}")
+                _log_failure(f"Error downloading stories for {username}", e)
 
             # download all posts
             try:
@@ -199,7 +206,7 @@ class InstagramAPIExtractor(Extractor):
                 result.append("errors", f"Error downloading posts for {username}")
                 # otherwise the row reads as a plain success with the profile's own posts missing
                 result.add_status_note("own posts failed - see logs")
-                logger.error(f"Error downloading posts for {username}: {e} {traceback.format_exc()}")
+                _log_failure(f"Error downloading posts for {username}", e)
 
             # download all tagged
             try:
@@ -209,7 +216,7 @@ class InstagramAPIExtractor(Extractor):
                     )
             except Exception as e:
                 result.append("errors", f"Error downloading tagged posts for {username}")
-                logger.error(f"Error downloading tagged posts for {username}: {e} {traceback.format_exc()}")
+                _log_failure(f"Error downloading tagged posts for {username}", e)
 
             # download all highlights
             try:
@@ -219,7 +226,7 @@ class InstagramAPIExtractor(Extractor):
                     )
             except Exception as e:
                 result.append("errors", f"Error downloading highlights for {username}")
-                logger.error(f"Error downloading highlights for {username}: {e} {traceback.format_exc()}")
+                _log_failure(f"Error downloading highlights for {username}", e)
 
         result.set_url(url)  # reset as scrape_item modifies it
         return result.success("insta profile")
@@ -248,9 +255,7 @@ class InstagramAPIExtractor(Extractor):
                     "errors",
                     f"Error downloading highlight id{h.get('pk')} for {username}",
                 )
-                logger.error(
-                    f"Error downloading highlight id{h.get('pk')} for {username}: {e} {traceback.format_exc()}"
-                )
+                _log_failure(f"Error downloading highlight id{h.get('pk')} for {username}", e)
             self._set_profile_stage("highlights", count_highlights, max_to_download)
             if count_highlights >= max_to_download:
                 logger.debug(f"HIGHLIGHTS reached max_to_download={self.full_profile_max_posts}")
@@ -299,13 +304,13 @@ class InstagramAPIExtractor(Extractor):
 
         items = h_info.get("items", [])[::-1]  # newest to oldest
         items = items[: min(max_to_download, len(items))]
-        for h in tqdm(items, desc="downloading highlights", unit="highlight"):
+        for h in items:
             try:
                 self.scrape_item(result, h, "highlight")
             except Exception as e:
                 result.append("errors", f"Error downloading highlight {h.get('id')}")
                 self._skipped_items += 1
-                logger.error(f"Error downloading highlight, skipping {h.get('id')}: {e} {traceback.format_exc()}")
+                _log_failure(f"Error downloading highlight, skipping {h.get('id')}", e)
 
         return h_info
 
@@ -323,18 +328,17 @@ class InstagramAPIExtractor(Extractor):
             return []
         stories = stories[::-1][: min(max_to_download, len(stories))]  # newest to oldest
 
-        for s in tqdm(stories, desc="downloading stories", unit="story"):
+        for s in stories:
             try:
                 self.scrape_item(result, s, "story")
             except Exception as e:
                 result.append("errors", f"Error downloading story {s.get('id')}")
                 self._skipped_items += 1
-                logger.error(f"Error downloading story, skipping {s.get('id')}: {e} {traceback.format_exc()}")
+                _log_failure(f"Error downloading story, skipping {s.get('id')}", e)
         return stories
 
     def download_all_posts(self, result: Metadata, user_id: str, max_to_download: int) -> int:
         next_page_id = None
-        pbar = tqdm(desc="downloading posts")
 
         post_count = 0
         while True:
@@ -353,8 +357,7 @@ class InstagramAPIExtractor(Extractor):
                 except Exception as e:
                     result.append("errors", f"Error downloading post {p.get('id')}")
                     self._skipped_items += 1
-                    logger.error(f"Error downloading post, skipping {p.get('id')}: {e} {traceback.format_exc()}")
-                pbar.update(1)
+                    _log_failure(f"Error downloading post, skipping {p.get('id')}", e)
                 post_count += 1
             self._set_profile_stage("posts", post_count, max_to_download)
             if post_count >= max_to_download:
@@ -367,7 +370,6 @@ class InstagramAPIExtractor(Extractor):
 
     def download_all_tagged(self, result: Metadata, user_id: str, max_to_download: int) -> int:
         next_page_id = ""
-        pbar = tqdm(desc="downloading tagged posts")
 
         tagged_count = 0
         while next_page_id is not None:
@@ -385,8 +387,7 @@ class InstagramAPIExtractor(Extractor):
                 except Exception as e:
                     result.append("errors", f"Error downloading tagged post {p.get('id')}")
                     self._skipped_items += 1
-                    logger.error(f"Error downloading tagged post, skipping {p.get('id')}: {e} {traceback.format_exc()}")
-                pbar.update(1)
+                    _log_failure(f"Error downloading tagged post, skipping {p.get('id')}", e)
                 tagged_count += 1
             self._set_profile_stage("tagged posts", tagged_count, max_to_download)
             if tagged_count >= max_to_download:
@@ -432,7 +433,7 @@ class InstagramAPIExtractor(Extractor):
             except Exception as e:
                 result.append("errors", f"Error downloading carousel item {r.get('id')}")
                 self._skipped_items += 1
-                logger.error(f"Error downloading carousel item, skipping {r.get('id')}: {e}")
+                _log_failure(f"Error downloading carousel item, skipping {r.get('id')}", e)
         if not resources_metadata.is_empty():
             media.set("other media", resources_metadata.media)
 

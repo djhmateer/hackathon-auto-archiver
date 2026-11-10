@@ -946,7 +946,11 @@ Here's how that would look: \n\nsteps:\n  extractors:\n  - [your_extractor_name_
                 if result.is_success():
                     break
             except Exception as e:
-                logger.error(f"Extractor {a.name}: {e}: {traceback.format_exc()}")
+                # DM 10th Nov 26 - a 404 is content that's gone (the next extractor still tries), not a fault
+                if isinstance(e, requests.HTTPError) and e.response is not None and e.response.status_code == 404:
+                    logger.warning(f"Extractor {a.name}: {e}")
+                else:
+                    logger.error(f"Extractor {a.name}: {e}: {traceback.format_exc()}")
 
         if not result.is_success():
             logger.warning(f"No successful capture for {url}, status={result.status!r}, notes={result.get_status_notes()}")
