@@ -44,6 +44,11 @@ for CONFIG_PORT in 340 341 342 343 344 345; do
     scp -q -P "$CONFIG_PORT" $CONFIGS "$HOST:/home/dave/auto-archiver/secrets/"
 done
 
+# DM 10th Nov 26 - the Google service accounts the configs use. Only the coordinator needs them, as it reads and writes
+# the sheets. rsync, so only changed ones are sent
+echo "== Copying any changed service accounts to $HOST port $PORT"
+rsync -tp --itemize-changes -e "ssh -p $PORT" secrets/service_account*.json "$HOST:/home/dave/auto-archiver/secrets/"
+
 # DM 9th Nov 26 - the alert email settings from your .env, but not the whole file, as its AA_DATABASE_URL is your local
 # database. They go on stdin, so they're never on a command line or in the output
 for KEY in POSTMARK_API_TOKEN POSTMARK_FROM_EMAIL ALERT_EMAIL_TO; do
