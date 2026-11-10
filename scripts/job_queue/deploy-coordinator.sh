@@ -37,7 +37,7 @@ fi
 
 # secrets/ isn't in git. The coordinator writes the sheet cells using its copy's columns, and the workers archive with
 # theirs, so copy them to all three whichever script is run (DM 4th Nov 26 - a stale coordinator copy dropped new columns)
-CONFIGS="secrets/orchestration-aa-dave-testing.yaml secrets/orchestration-aa-clienta.yaml secrets/orchestration-aa-clientb.yaml secrets/orchestration-glan-sheet4.yaml"
+CONFIGS="secrets/orchestration-aa-dave-testing.yaml secrets/orchestration-aa-clienta.yaml secrets/orchestration-aa-clientb.yaml secrets/orchestration-glan-sheet1.yaml secrets/orchestration-glan-sheet4.yaml"
 for CONFIG_PORT in 340 341 342; do
     echo "== Copying $CONFIGS to $HOST port $CONFIG_PORT"
     scp -q -P "$CONFIG_PORT" $CONFIGS "$HOST:/home/dave/auto-archiver/secrets/"
