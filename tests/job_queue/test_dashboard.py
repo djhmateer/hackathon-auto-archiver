@@ -248,6 +248,22 @@ def test_waiting_jobs_with_no_organisation_or_pool_worker_say_so(conn):
     assert "cir  " in sheets
 
 
+def test_a_job_whose_pool_is_all_busy_says_so(conn):
+    glan = conn.execute("INSERT INTO organisations (name, pool) VALUES ('Org G', 'glan') RETURNING id").fetchone()["id"]
+    conn.execute("INSERT INTO workers (name, pool) VALUES ('g1', 'glan')")
+    sheet_id = add_sheet(conn)
+    conn.execute("UPDATE sheets SET organisation_id = %s WHERE id = %s", (glan, sheet_id))
+    run_job(conn, sheet_id, 2, "site1.com", worker="g1")
+    add_job(conn, sheet_id, 3, "site2.com")
+    screen = "\n".join(dashboard.waiting(conn))
+    # the test pool's workers are idle, but can't take it
+    assert "1 queued job(s)" in screen
+    assert "row 3 site2.com: " + YELLOW + "every worker in its pool is busy" in screen
+
+    conn.execute("INSERT INTO workers (name, pool) VALUES ('g2', 'glan')")
+    assert "0 queued job(s)" in "\n".join(dashboard.waiting(conn))  # g2 is free to take it
+
+
 def test_a_worker_with_no_pool_is_red(conn):
     db.beat(conn, "worker-supervisor-new-vm")
     screen = "\n".join(dashboard.workers(conn, "abc1234"))
