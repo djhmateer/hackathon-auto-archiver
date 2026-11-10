@@ -52,6 +52,7 @@ New modules should follow the existing pattern:
   - `ssh 192.168.1.212 -p 342` - glanworker2 (was worker42)
   - `ssh 192.168.1.212 -p 343` - hmsworker1 (was testworker1)
   - `ssh 192.168.1.212 -p 344` - hmsworker2
+  - `ssh 192.168.1.212 -p 345` - cirworker1
 - Never connect to any other production server or host. The old cron servers 11-15 are retired (Nov 2026).
 - On the pve3 VMs, read-only commands are fine (logs, `journalctl`, `df`, `SELECT`s). Anything that changes a VM
   (restarts, edits, installs, `INSERT`/`UPDATE`/`DELETE`) needs the user's go-ahead in that message; otherwise give
@@ -71,7 +72,7 @@ Where to look, in this order:
      written), `job_files`, `admin_alerts`, `heartbeats`. The schema is in `src/auto_archiver/job_queue/migrations/`.
 2. The coordinator's log: `journalctl -u aa-coordinator` on 340 - each job queued, claimed and finished, workers
    going quiet, sheet writes, sync and alert email errors.
-3. A worker's logs, on 341, 342, 343 or 344 (from `jobs.worker`), in `~/auto-archiver/logs/`:
+3. A worker's logs, on 341 to 345 (from `jobs.worker`), in `~/auto-archiver/logs/`:
    - `1debug.log` (and rotated copies) - the archiver at DEBUG. Every line has the job id after the level, eg
      `| INFO     | job 92 | auto_archiver.core.orchestrator:feed:123 - ...`, so `grep "| job 92 |"` gives a whole job
    - `console/job_<id>.log` - the archiver's console output at ERROR, one header line per attempt: setup errors
