@@ -92,7 +92,7 @@ def test_a_worker_only_claims_from_its_own_pool(conn):
     test_job = add_job(conn, add_sheet(conn, gid=1), row=3)
     conn.execute("INSERT INTO workers (name, pool) VALUES ('g1', 'glan')")
 
-    assert db.claim_job(conn, "vm1")["id"] == test_job  # test pool, so not the older glan job
+    assert db.claim_job(conn, "vm1")["id"] == test_job  # hms pool, so not the older glan job
     assert db.claim_job(conn, "vm2") is None
     assert db.claim_job(conn, "g1")["id"] == glan_job
 

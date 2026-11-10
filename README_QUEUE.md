@@ -229,14 +229,14 @@ The Docker images aren't updated when you deploy by hand. To update them, follow
 
 ## Pools and organisations
 
-Workers are split into pools (`glan`, `test`, `cir`), each a group of worker VMs. Every sheet belongs to an organisation, and every organisation to one pool. A worker only claims jobs from the sheets of its own pool's organisations, and an idle pool never helps another.
+Workers are split into pools (`glan`, `hms`, `cir`), each a group of worker VMs. Every sheet belongs to an organisation, and every organisation to one pool. A worker only claims jobs from the sheets of its own pool's organisations, and an idle pool never helps another.
 
 - `pools`: the pool names. Add one with `INSERT INTO pools (name) VALUES ('<pool>')`.
 - `organisations` (`id`, `name`, `pool`): who owns sheets, eg for a future dashboard each organisation logs in to.
 - `sheets.organisation_id`: a sheet with none is never claimed. A new tab of a spreadsheet already in an organisation joins it. A new spreadsheet, added by `sync add` (eg in a deploy, which then logs a warning) or `register`, has none, so set it.
 - `workers` (`name`, `pool`): each worker VM, by its hostname. A worker that isn't here claims nothing, and its supervisor logs a warning saying so.
 
-The dashboard shows each worker's and each sheet's pool, in red if it has none, and the Waiting section says when a job is held because its sheet has no organisation or its pool has no worker. One job per site still applies across all pools, so a GLAN job on a site holds back a TEST job on the same site.
+The dashboard shows each worker's and each sheet's pool, in red if it has none, and the Waiting section says when a job is held because its sheet has no organisation or its pool has no worker. One job per site still applies across all pools, so a GLAN job on a site holds back an HMS job on the same site.
 
 To set up an organisation and its sheets, and a worker, on the coordinator:
 

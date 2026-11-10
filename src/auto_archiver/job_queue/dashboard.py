@@ -364,7 +364,7 @@ def waiting(conn) -> list[str]:
                 WHEN j.available_at > now() THEN 'retry'
                 WHEN EXISTS (SELECT 1 FROM jobs b WHERE b.domain = j.domain AND b.status = 'running')
                     THEN 'site busy'
-                -- eg the test pool's worker is busy while the glan workers are idle
+                -- eg the hms pool's workers are busy while the glan workers are idle
                 WHEN NOT EXISTS (SELECT 1 FROM organisations o JOIN workers w ON w.pool = o.pool
                                  WHERE o.id = s.organisation_id AND NOT EXISTS (
                                      SELECT 1 FROM jobs r WHERE r.worker = w.name AND r.status = 'running'))

@@ -25,7 +25,7 @@ def schema():
         conn.execute("DROP SCHEMA public CASCADE")
         conn.execute("CREATE SCHEMA public")
         migrate.migrate(conn)
-        # test only: every sheet a test adds is in organisation 1, which conn puts in the test pool, so the tests'
+        # test only: every sheet a test adds is in organisation 1, which conn puts in the hms pool, so the tests'
         # workers claim it
         conn.execute("ALTER TABLE sheets ALTER COLUMN organisation_id SET DEFAULT 1")
 
@@ -64,8 +64,8 @@ def conn(schema):
         conn.execute(
             "TRUNCATE sheets, jobs, sheet_writes, admin_alerts, heartbeats, workers, organisations RESTART IDENTITY CASCADE"
         )
-        conn.execute("INSERT INTO organisations (name, pool) VALUES ('Test organisation', 'test')")
-        # the worker names the tests use, all in the test pool
+        conn.execute("INSERT INTO organisations (name, pool) VALUES ('Test organisation', 'hms')")
+        # the worker names the tests use, all in the hms pool
         for name in ("vm1", "vm2", "vm3", "worker41", "worker42", "glanworker1", "glanworker2"):
-            conn.execute("INSERT INTO workers (name, pool) VALUES (%s, 'test')", (name,))
+            conn.execute("INSERT INTO workers (name, pool) VALUES (%s, 'hms')", (name,))
         yield conn

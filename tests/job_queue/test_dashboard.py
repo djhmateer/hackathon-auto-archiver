@@ -256,7 +256,7 @@ def test_a_job_whose_pool_is_all_busy_says_so(conn):
     run_job(conn, sheet_id, 2, "site1.com", worker="g1")
     add_job(conn, sheet_id, 3, "site2.com")
     screen = "\n".join(dashboard.waiting(conn))
-    # the test pool's workers are idle, but can't take it
+    # the hms pool's workers are idle, but can't take it
     assert "1 queued job(s)" in screen
     assert "row 3 site2.com: " + YELLOW + "every worker in its pool is busy" in screen
 
