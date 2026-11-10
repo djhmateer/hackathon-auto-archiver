@@ -2,6 +2,7 @@ import os
 
 from importlib.metadata import version
 import hashlib
+import warnings
 
 from slugify import slugify
 from retrying import retry
@@ -13,6 +14,7 @@ from rfc3161_client import VerificationError as Rfc3161VerificationError
 from rfc3161_client.tsp import SignedData
 from cryptography import x509
 from cryptography.hazmat.primitives import serialization
+from cryptography.utils import CryptographyDeprecationWarning
 import certifi
 
 from auto_archiver.core import Enricher
@@ -131,7 +133,11 @@ class TimestampingEnricher(Enricher):
         cert_authorities = []
 
         with open(trusted_root_path, 'rb') as f:
-            cert_authorities = x509.load_pem_x509_certificates(f.read())
+            # DM 10th Nov 26 - a CA in certifi's bundle has a negative serial number, which cryptography accepts but
+            # warns about on stderr, putting the same warning in every job's console log
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore", CryptographyDeprecationWarning)
+                cert_authorities = x509.load_pem_x509_certificates(f.read())
 
         if not cert_authorities:
             raise ValueError(f"No trusted roots found in {trusted_root_path}.")
