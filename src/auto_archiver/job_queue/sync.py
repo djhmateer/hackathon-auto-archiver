@@ -312,10 +312,15 @@ def sync_cycle(conn, opener=open_spreadsheet) -> None:
                     and sheet["config"] == config_path
                     and sheet["worksheet_gid"] not in allowed_ids
                 ):
-                    logger.warning(
-                        f"{db.describe_tab(spreadsheet.title, sheet['worksheet'])} (sheet {sheet['id']}) "
-                        f"is not being read: it was deleted, or renamed or blocked so that {config_path} doesn't allow it"
-                    )
+                    tab_name = f"{db.describe_tab(spreadsheet.title, sheet['worksheet'])} (sheet {sheet['id']})"
+                    # eg a tab taken out of allow_worksheets. One with jobs is kept, for its history
+                    if db.remove_unused_tab(conn, sheet["id"]):
+                        logger.info(f"Removed {tab_name}, as {config_path} doesn't allow it and it never had a job")
+                    else:
+                        logger.warning(
+                            f"{tab_name} is not being read: it was deleted, or renamed or blocked so that "
+                            f"{config_path} doesn't allow it"
+                        )
 
             sheets = {
                 sheet["worksheet_gid"]: sheet

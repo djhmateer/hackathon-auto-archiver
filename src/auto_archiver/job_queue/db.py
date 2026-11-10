@@ -173,6 +173,17 @@ def save_tab_read(conn: psycopg.Connection, sheet_id: int, url_rows: int, blank_
     )
 
 
+def remove_unused_tab(conn: psycopg.Connection, sheet_id: int) -> bool:
+    """Removes a tab that has never had a job, eg one its config no longer allows. False if it has jobs, so is kept"""
+    return (
+        conn.execute(
+            "DELETE FROM sheets WHERE id = %(id)s AND NOT EXISTS (SELECT 1 FROM jobs WHERE sheet_id = %(id)s)",
+            {"id": sheet_id},
+        ).rowcount
+        == 1
+    )
+
+
 def enable_spreadsheet(conn: psycopg.Connection, spreadsheet_id: str) -> int:
     """Moves all of a spreadsheet's tabs to the queue. Returns how many tabs it has"""
     return conn.execute("UPDATE sheets SET enabled = true WHERE spreadsheet_id = %s", (spreadsheet_id,)).rowcount
@@ -425,7 +436,8 @@ def claim_job(conn: psycopg.Connection, worker: str, git_commit: str = None) -> 
         job = conn.execute(
             """
             UPDATE jobs SET status = 'running', worker = %s, git_commit = %s, attempts = attempts + 1,
-                started_at = COALESCE(started_at, now()), work_started_at = NULL, stage = NULL, stage_at = NULL,
+                started_at = COALESCE(started_at, now()), work_started_at = NULL,
+                stage = NULL, stage_at = NULL,
                 lease_token = gen_random_uuid(), lease_until = now() + interval '5 minutes'
             FROM sheets sheet
             WHERE sheet.id = jobs.sheet_id AND jobs.id = (

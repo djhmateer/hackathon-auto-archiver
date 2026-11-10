@@ -165,6 +165,20 @@ def test_row_without_a_folder_is_not_recorded_when_one_is_required(conn, config)
     assert [j["row_number"] for j in queued(conn)] == [2]
 
 
+def test_tab_taken_out_of_the_allow_list_with_no_jobs_is_removed(conn, config, mocker):
+    sheet = FakeSpreadsheet([tab_of(gid=1), tab_of(gid=2, title="Tab 2")])
+    setup_sheet(conn, sheet)
+
+    logger = mocker.patch("auto_archiver.job_queue.sync.logger")
+    config(allow_worksheets="['Tab 1']")
+    run(conn, sheet)
+
+    assert [s["worksheet"] for s in db.get_sheets(conn)] == ["Tab 1"]
+    removed = logger.info.call_args_list[0].args[0]
+    assert "tab Tab 2 (sheet 2), as orchestration-example.yaml doesn't allow it" in removed
+    logger.warning.assert_not_called()
+
+
 def test_tab_renamed_out_of_the_allow_list_gets_a_warning(conn, config, mocker):
     config(allow_worksheets="['Tab 1']")
     tab = tab_of(row("https://example.com/1"))
