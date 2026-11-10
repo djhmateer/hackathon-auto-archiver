@@ -21,6 +21,9 @@ from auto_archiver.utils.custom_logger import logger
 import os
 
 from .media import Media
+from auto_archiver.job_queue.stage import set_stage
+
+STAGE_EVERY_MEDIA = 50  # how often storing updates the dashboard's stage
 
 
 @dataclass_json  # annotation order matters
@@ -66,7 +69,9 @@ class Metadata:
     def store(self, storages=[]):
         # calls .store for all contained media. storages [Storage]
         self.remove_duplicate_media_by_hash()
-        for media in self.media:
+        for i, media in enumerate(self.media):
+            if i % STAGE_EVERY_MEDIA == 0:
+                set_stage("storing", f"media {i + 1} of {len(self.media)}")
             # 10th Nov 25 - DM weird vpn error trying to catch
             try:
                 # logger.debug(f"Storing media {media}")

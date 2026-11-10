@@ -447,7 +447,10 @@ class WorkerSupervisor:
                 # a new connection each time, so a Postgres restart only loses a few ticks
                 with db.connect() as conn:
                     self.tick(conn)
-                    db.beat(conn, f"worker-supervisor-{self.worker}", self.git_commit, machine_stats(self.dir))
+                    stats = machine_stats(self.dir)
+                    db.beat(conn, f"worker-supervisor-{self.worker}", self.git_commit, stats)
+                    if self.running is not None:
+                        db.record_peaks(conn, self.running.job["id"], self.worker, stats)
             except Exception as e:
                 logger.error(f"Supervisor tick failed, jobs carry on running: {e}")
             time.sleep(TICK_SECONDS)

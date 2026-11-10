@@ -425,7 +425,7 @@ def claim_job(conn: psycopg.Connection, worker: str, git_commit: str = None) -> 
         job = conn.execute(
             """
             UPDATE jobs SET status = 'running', worker = %s, git_commit = %s, attempts = attempts + 1,
-                started_at = COALESCE(started_at, now()), work_started_at = NULL,
+                started_at = COALESCE(started_at, now()), work_started_at = NULL, stage = NULL, stage_at = NULL,
                 lease_token = gen_random_uuid(), lease_until = now() + interval '5 minutes'
             FROM sheets sheet
             WHERE sheet.id = jobs.sheet_id AND jobs.id = (
@@ -504,6 +504,56 @@ RESULT_COLUMNS = ("title", "archive_url", "extractor", "posted_at", "cached", "s
 FILE_COLUMNS = ("role", "key", "url", "mimetype", "bytes", "hash", "duration_seconds")
 
 
+def start_stage(conn: psycopg.Connection, job_id: int, step: str, stage: str) -> None:
+    """
+    A running job's archiver has moved on to the next step: ends this attempt's previous step in job_stages and starts
+    this one. stage is what the dashboard shows, the step with any progress, eg 'storing: media 1 of 300'
+    """
+    with conn.transaction():
+        job = conn.execute(
+            "UPDATE jobs SET stage = %s, stage_at = now() WHERE id = %s AND status = 'running' RETURNING attempts",
+            (stage, job_id),
+        ).fetchone()
+        if job is None:
+            return
+        end_stages(conn, job_id)
+        conn.execute(
+            "INSERT INTO job_stages (job_id, attempt, step) VALUES (%s, %s, %s)", (job_id, job["attempts"], step)
+        )
+
+
+def set_stage_progress(conn: psycopg.Connection, job_id: int, stage: str) -> None:
+    """The same step, further on, eg 'storing: media 51 of 300'. Its start time stays the same"""
+    conn.execute("UPDATE jobs SET stage = %s WHERE id = %s AND status = 'running'", (stage, job_id))
+
+
+def end_stages(conn: psycopg.Connection, job_id: int) -> None:
+    """
+    Ends this attempt's open step. Only steps since this attempt started work, as a released attempt gives its attempt
+    number back, and the step it was killed in stays open
+    """
+    conn.execute(
+        """
+        UPDATE job_stages SET ended_at = now()
+        WHERE job_id = %(id)s AND ended_at IS NULL
+            AND started_at >= (SELECT work_started_at FROM jobs WHERE id = %(id)s)
+        """,
+        {"id": job_id},
+    )
+
+
+def record_peaks(conn: psycopg.Connection, job_id: int, worker: str, stats: dict) -> None:
+    """Keeps the job's lowest memory available and disk free, from the worker's machine_stats(). LEAST skips NULLs"""
+    conn.execute(
+        """
+        UPDATE jobs SET min_mem_available_bytes = LEAST(min_mem_available_bytes, %s),
+            min_disk_free_bytes = LEAST(min_disk_free_bytes, %s)
+        WHERE id = %s AND worker = %s
+        """,
+        (stats["mem_available_bytes"], stats["disk_free_bytes"], job_id, worker),
+    )
+
+
 def finish_job(
     conn: psycopg.Connection,
     job_id: int,
@@ -536,6 +586,7 @@ def finish_job(
             "INSERT INTO sheet_writes (job_id, cells, expected_status) VALUES (%s, %s, %s)",
             (job_id, Jsonb(cells), STATUS_IN_PROGRESS),
         )
+        end_stages(conn, job_id)
         for file in files:
             conn.execute(
                 f"""

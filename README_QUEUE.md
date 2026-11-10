@@ -10,6 +10,7 @@ How to install, run, deploy and operate the Postgres job queue. The design, and 
 - [Installing a coordinator VM](#installing-a-coordinator-vm)
 - [Installing a worker VM](#installing-a-worker-vm)
 - [Deploying updates](#deploying-updates)
+- [Prioritising jobs](#prioritising-jobs)
 - [Updating the OS](#updating-the-os)
 - [Moving a spreadsheet from cron to the queue](#moving-a-spreadsheet-from-cron-to-the-queue)
 - [Stopping a worker](#stopping-a-worker)
@@ -206,6 +207,36 @@ sudo systemctl start aa-worker-supervisor
 
 The Docker images aren't updated when you deploy by hand. To update them, follow the steps in `scripts/job_queue/deploy-workers.sh`.
 
+## Prioritising jobs
+
+There are no job priorities. A worker claims from the tab with the fewest running jobs for its weight first, then the oldest job (lowest id). It skips a job whose site (`jobs.domain`) already has a job running, so no site runs more than one at a time.
+
+So before killing anything, check what the jobs you want are waiting for. On the coordinator:
+
+```bash
+$Q "SELECT j.id, j.status, j.worker, s.worksheet, j.domain, j.attempts, j.available_at, now() - j.started_at AS running_for
+    FROM jobs j JOIN sheets s ON s.id = j.sheet_id WHERE j.status IN ('queued', 'running') ORDER BY j.id"
+```
+
+If they're waiting for their site, killing a job on another worker doesn't help. They wait for the job running on that site, and only one of them can run at a time.
+
+To kill the job that's in the way and put it back on the queue, on the worker running it (`jobs.worker`). These are the steps `deploy-workers.sh` takes:
+
+```bash
+sudo systemctl kill -s SIGKILL aa-worker-supervisor   # kill the supervisor and its running job
+sudo systemctl stop aa-worker-supervisor              # after the kill, or Restart=on-failure starts it again
+cd ~/auto-archiver && poetry run python -m auto_archiver.job_queue.worker_supervisor --release
+sudo systemctl start aa-worker-supervisor
+```
+
+`--release` removes the crawl container and the job's files, and puts the job back on the queue without using up an attempt. The job starts again from scratch, so the time it had run is lost.
+
+The released job keeps its old, lower id, so it can be claimed again before the jobs you wanted. It is only behind them while its tab has more jobs running than theirs. To keep it back for certain, run this on the coordinator between the `--release` and the `start`:
+
+```bash
+$Q "UPDATE jobs SET available_at = now() + interval '2 hours' WHERE id = <id>"
+```
+
 ## Updating the OS
 
 ```bash
@@ -257,7 +288,7 @@ Each run turns the spreadsheet's tabs off and cancels any queued jobs, which cle
 On the coordinator, `d` (or `poetry run python -m auto_archiver.job_queue.dashboard` from the repo) shows a dashboard that refreshes every 2 seconds until Ctrl+C. It only reads the database. It shows:
 
 - the coordinator's heartbeat, CPU use, free disk, free memory and swap used; queue totals; jobs finished in the last hour and 24 hours, and how long the oldest queued job has waited; and the last backup;
-- each worker's heartbeat, code (red if it differs from the coordinator's, so it missed a deploy), CPU use, free disk, free memory, swap used, today's done and failed, and its running job. Workers send their code, CPU, disk, memory and swap with each heartbeat;
+- each worker's heartbeat, code (red if it differs from the coordinator's, so it missed a deploy), CPU use, free disk, free memory, swap used, today's done and failed, and its running job with the time this attempt has run. Under the job is its stage and how long it has been in it: the extractor, enricher or formatter running, `storing: media 51 of 300`, or for an Instagram profile a running count such as `instagram_api_extractor: posts 430, 455 of 1000 limit` (stories, posts, tagged posts and highlights all count towards the profile's limit). The archiver saves its stage to `jobs.stage` as it goes, and each new attempt starts with none. Workers send their code, CPU, disk, memory and swap with each heartbeat;
 - each tab's queued, running, last 24 hours' done and failed, its rows, blank statuses and when sync last read it (red if a tab that's on hasn't been read for a minute);
 - queued jobs that can't be claimed yet, and why;
 - the 10 busiest sites in the last 24 hours, with done, failed, blocked and average time;
@@ -294,6 +325,21 @@ $Q "SELECT status, count(*) FROM jobs GROUP BY status"
 $Q "SELECT id, row_number, status, attempts, worker, error FROM jobs ORDER BY id DESC LIMIT 20"
 $Q "SELECT name, beat_at FROM heartbeats"
 $Q "SELECT kind, message, created_at FROM admin_alerts ORDER BY id DESC LIMIT 20"
+```
+
+How long each step of a job took, from `job_stages`: one row per extractor, enricher, `storing` and formatter, for each attempt. A step with no `ended_at` is the one an attempt was killed or crashed in. A release gives its attempt number back, so a released attempt and the next one share a number.
+
+```bash
+$Q "SELECT attempt, step, started_at, ended_at - started_at AS took FROM job_stages WHERE job_id = <id> ORDER BY id"
+$Q "SELECT step, count(*), avg(ended_at - started_at) AS average, max(ended_at - started_at) AS longest
+    FROM job_stages WHERE started_at > now() - interval '1 day' GROUP BY step ORDER BY longest DESC"
+```
+
+The lowest memory available and disk free on its worker while each job ran, over all its attempts, saved by the supervisor with each heartbeat:
+
+```bash
+$Q "SELECT id, worker, domain, min_mem_available_bytes / 1048576 AS min_mem_mb, min_disk_free_bytes / 1073741824.0 AS min_disk_gb
+    FROM jobs WHERE finished_at > now() - interval '1 day' ORDER BY min_mem_available_bytes LIMIT 10"
 ```
 
 ### Alerts

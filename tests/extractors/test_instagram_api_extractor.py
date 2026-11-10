@@ -281,6 +281,22 @@ class TestInstagramAPIExtractor(TestExtractorBase):
         assert "Error downloading carousel item c2" in result.get("errors")
         assert result.get_status_notes() == ["1 Instagram item(s) failed to download - see logs"]
 
+    @pytest.mark.parametrize(
+        "limit, expected",
+        [
+            (1000, "posts 30, 50 of 1000 limit"),
+            (math.inf, "posts 30"),
+        ],
+    )
+    def test_profile_stage_counts_the_whole_profile_against_the_limit(self, mocker, limit, expected):
+        set_stage = mocker.patch(
+            "auto_archiver.modules.instagram_api_extractor.instagram_api_extractor.set_stage"
+        )
+        self.extractor.full_profile_max_posts = limit
+        # 20 stories were downloaded before the posts, so the posts started with limit - 20 left
+        self.extractor._set_profile_stage("posts", 30, limit - 20)
+        set_stage.assert_called_once_with("instagram_api_extractor", expected)
+
     def test_download_all_posts_follows_next_page_id(self, mocker):
         mock_call = mocker.patch.object(
             self.extractor,

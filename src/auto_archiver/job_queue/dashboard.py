@@ -11,7 +11,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from auto_archiver.job_queue import db
-from auto_archiver.job_queue.coordinator import WORKER_QUIET_SECONDS
+from auto_archiver.job_queue.coordinator import SYNC_SECONDS, WORKER_QUIET_SECONDS
 from auto_archiver.job_queue.worker_supervisor import TIME_LIMIT_SECONDS, git_commit, machine_stats
 
 REFRESH_SECONDS = 2
@@ -22,7 +22,7 @@ WAITING_JOBS = 10
 TAB_WIDTH = 30
 FAILURES = 5
 SITES = 10
-READ_LATE_SECONDS = 60  # sync reads every tab that's on every 15s
+READ_LATE_SECONDS = 60  # sync reads every tab that's on every SYNC_SECONDS
 QUEUED_LONG_SECONDS = 60 * 60
 WORKER_WIDTH = 12  # eg glanworker1
 INDENT = " " * (WORKER_WIDTH + 3)  # lines under a worker's first line
@@ -30,6 +30,7 @@ GB, MB = 1024**3, 1024**2
 DISK_LOW, DISK_VERY_LOW = 10 * GB, 5 * GB
 # of memory still available
 MEMORY_LOW, MEMORY_VERY_LOW = 0.25, 0.10
+BAR_WIDTH = 10  # blocks in the memory bar, each one a tenth of the total
 SWAP_HIGH = GB
 CPU_HIGH = 90  # percent. A crawl uses a lot, so only yellow, and only near full
 
@@ -60,16 +61,19 @@ def machine(stats: dict) -> str:
         return colour(DIM, "cpu, disk, memory and swap ?")  # sent from the next worker deploy
     free = stats["disk_free_bytes"]
     disk = colour(RED if free < DISK_VERY_LOW else YELLOW if free < DISK_LOW else GREEN, f"{free / GB:.1f} GB")
-    share = stats["mem_available_bytes"] / stats["mem_total_bytes"]
+    available, total = stats["mem_available_bytes"], stats["mem_total_bytes"]
+    share = available / total
+    used_blocks = round(BAR_WIDTH * (1 - share))
+    bar = "█" * used_blocks + "░" * (BAR_WIDTH - used_blocks)
     memory = colour(
         RED if share < MEMORY_VERY_LOW else YELLOW if share < MEMORY_LOW else GREEN,
-        f"{stats['mem_available_bytes'] / GB:.1f} of {stats['mem_total_bytes'] / GB:.1f} GB",
+        f"[{bar}] {(total - available) / GB:.1f} GB used, {available / GB:.1f} GB",
     )
     swap_used = stats["swap_used_bytes"]
     swap = colour(YELLOW if swap_used > SWAP_HIGH else GREEN, f"{swap_used / MB:.0f} MB")
     cpu = "?" if stats.get("cpu_percent") is None else f"{stats['cpu_percent']:.0f}%"
     cpu = colour(YELLOW if stats.get("cpu_percent") and stats["cpu_percent"] > CPU_HIGH else GREEN, cpu)
-    return f"cpu {cpu}, disk {disk} free, memory {memory} free, swap {swap} used"
+    return f"cpu {cpu}, disk {disk} free, memory {memory} available, swap {swap} used"
 
 
 def tab(row) -> str:
@@ -161,19 +165,30 @@ def workers(conn, coordinator_commit: str) -> list[str]:
         if job is None:
             lines.append(colour(DIM, f"{INDENT}idle"))
         else:
-            seconds = (datetime.now(timezone.utc) - job["started_at"]).total_seconds()
-            took = colour(RED if seconds > TIME_LIMIT_SECONDS else GREEN, ago(seconds))
+            if job["work_started_at"] is None:
+                took = colour(DIM, "setting up")
+            else:
+                # this attempt, not started_at: that's the first claim, so it would add the time of a released attempt
+                seconds = (datetime.now(timezone.utc) - job["work_started_at"]).total_seconds()
+                took = colour(RED if seconds > TIME_LIMIT_SECONDS else GREEN, ago(seconds))
             lines.append(
                 f"{INDENT}job {job['id']} {tab(job)} "
                 f"row {job['row_number']} {job['domain']}, {took}, attempt {job['attempts']}"
             )
+            if job["stage"]:  # set by the archiver as it goes, from the next worker deploy
+                in_stage = ago((datetime.now(timezone.utc) - job["stage_at"]).total_seconds())
+                lines.append(f"{INDENT}  {job['stage']}, {in_stage} in this stage")
     return lines
 
 
 def sheets(conn) -> list[str]:
     lines = [
         colour(BOLD, "Sheets")
-        + colour(DIM, "   done and failed are for the last 24h; rows have a URL, blank of them have no status"),
+        + colour(
+            DIM,
+            "   done and failed are for the last 24h; rows have a URL, blank of them have no status; "
+            f"each tab is read every {SYNC_SECONDS}s, red if not for {ago(READ_LATE_SECONDS)}",
+        ),
         colour(
             DIM,
             f"  {'':<{TAB_WIDTH}} {'queued':>6} {'running':>7} {'done':>6} {'failed':>6} {'rows':>6} {'blank':>6}"
@@ -232,7 +247,7 @@ def sites(conn) -> list[str]:
             count(*) FILTER (WHERE j.status = 'done' AND NOT w.blocked) AS done,
             count(*) FILTER (WHERE j.status = 'failed' AND NOT w.blocked) AS failed,
             count(*) FILTER (WHERE w.blocked) AS blocked,
-            extract(epoch FROM avg(j.finished_at - j.started_at))::int AS average
+            extract(epoch FROM avg(j.finished_at - j.work_started_at))::int AS average
         FROM jobs j
         LEFT JOIN LATERAL (
             SELECT coalesce(cells->>'status' ILIKE '%%blocked%%', false) AS blocked
@@ -270,7 +285,18 @@ def storage(conn) -> list[str]:
         line += ", " + colour(RED, f"{len(broken)} job(s) with files that couldn't be stored: {jobs}")
     else:
         line += ", " + colour(GREEN, "every file stored")
-    return [line]
+    lines = [line]
+    tabs = conn.execute(
+        """
+        SELECT s.spreadsheet_name, s.worksheet, count(*) AS files, coalesce(sum(f.bytes), 0) AS bytes
+        FROM job_files f JOIN jobs j ON j.id = f.job_id JOIN sheets s ON s.id = j.sheet_id
+        WHERE f.created_at > now() - interval '1 day'
+        GROUP BY s.id ORDER BY bytes DESC
+        """
+    ).fetchall()
+    for row in tabs:
+        lines.append(f"  {tab(row)[:TAB_WIDTH]:<{TAB_WIDTH}} {row['files']:>6} files {row['bytes'] / GB:>7.2f} GB")
+    return lines
 
 
 FINISHED_JOBS = """

@@ -42,6 +42,14 @@ def fresh_sync_logs():
     sync._last_logged.clear()
 
 
+@pytest.fixture(autouse=True)
+def fresh_stage():
+    """set_stage remembers the process's step, so each test starts with none"""
+    from auto_archiver.job_queue import stage
+
+    stage._step = None
+
+
 @pytest.fixture
 def database_url() -> str:
     return TEST_URL

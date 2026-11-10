@@ -8,6 +8,7 @@ import pytest
 
 from auto_archiver.job_queue import dashboard, db
 from auto_archiver.job_queue.dashboard import GREEN, RED, YELLOW
+from auto_archiver.job_queue.stage import set_stage
 
 
 @pytest.fixture(autouse=True)
@@ -73,7 +74,118 @@ def test_a_worker_shows_its_running_job_and_todays_counts(conn):
     running = run_job(conn, sheet_id, 4, "site3.com")
     line = "\n".join(dashboard.workers(conn, "abc1234"))
     assert f"{GREEN}1{dashboard.RESET} done, {YELLOW}1{dashboard.RESET} failed" in line
-    assert f"job {running['id']} Sheet A/tab1 row 4 site3.com" in line
+    assert f"job {running['id']} Sheet A/tab1 row 4 site3.com, {dashboard.DIM}setting up" in line
+
+
+def test_a_released_job_is_timed_from_its_new_attempt(conn):
+    db.beat(conn, "worker-supervisor-worker41")
+    job = run_job(conn, add_sheet(conn), 2, "site1.com")
+    conn.execute("UPDATE jobs SET started_at = now() - interval '90 minutes' WHERE id = %s", (job["id"],))
+    db.release_worker_jobs(conn, "worker41")
+    job = db.claim_job(conn, "worker41")
+    db.mark_work_started(conn, job["id"], job["lease_token"])
+    line = "\n".join(dashboard.workers(conn, "abc1234"))
+    assert f"site1.com, {GREEN}0s{dashboard.RESET}, attempt 1" in line
+
+
+def stage_of(conn, job_id):
+    return conn.execute("SELECT stage FROM jobs WHERE id = %s", (job_id,)).fetchone()["stage"]
+
+
+def test_a_running_job_shows_its_stage(conn, monkeypatch):
+    db.beat(conn, "worker-supervisor-worker41")
+    job = run_job(conn, add_sheet(conn), 2, "site1.com")
+    monkeypatch.setenv("AA_JOB_ID", str(job["id"]))
+    set_stage("wacz_extractor_enricher")
+    line = "\n".join(dashboard.workers(conn, "abc1234"))
+    assert "  wacz_extractor_enricher, 0s in this stage" in line
+
+
+def test_a_new_attempt_starts_with_no_stage(conn, monkeypatch):
+    job = run_job(conn, add_sheet(conn), 2, "site1.com")
+    monkeypatch.setenv("AA_JOB_ID", str(job["id"]))
+    set_stage("storing media 1 of 10")
+    db.release_worker_jobs(conn, "worker41")
+    db.claim_job(conn, "worker41")
+    assert stage_of(conn, job["id"]) is None
+
+
+def test_set_stage_does_nothing_outside_a_queue_job(conn, monkeypatch):
+    job = run_job(conn, add_sheet(conn), 2, "site1.com")
+    monkeypatch.delenv("AA_JOB_ID", raising=False)
+    set_stage("generic_extractor")
+    assert stage_of(conn, job["id"]) is None
+
+
+def test_set_stage_leaves_a_job_that_is_no_longer_running(conn, monkeypatch):
+    job = run_job(conn, add_sheet(conn), 2, "site1.com")
+    finish(conn, job, "done", "wacz: success")
+    monkeypatch.setenv("AA_JOB_ID", str(job["id"]))
+    set_stage("html_formatter")
+    assert stage_of(conn, job["id"]) is None
+
+
+def start_work(conn, sheet_id, row, monkeypatch, domain="site1.com", worker="worker41") -> dict:
+    job = run_job(conn, sheet_id, row, domain, worker)
+    db.mark_work_started(conn, job["id"], job["lease_token"])
+    monkeypatch.setenv("AA_JOB_ID", str(job["id"]))
+    return job
+
+
+def steps(conn, job_id) -> list[tuple]:
+    rows = conn.execute(
+        "SELECT attempt, step, ended_at IS NOT NULL AS ended FROM job_stages WHERE job_id = %s ORDER BY id", (job_id,)
+    ).fetchall()
+    return [(r["attempt"], r["step"], r["ended"]) for r in rows]
+
+
+def test_each_step_is_timed_and_progress_does_not_start_a_new_one(conn, monkeypatch):
+    job = start_work(conn, add_sheet(conn), 2, monkeypatch)
+    set_stage("instagram_api_extractor")
+    conn.execute("UPDATE jobs SET stage_at = now() - interval '10 minutes' WHERE id = %s", (job["id"],))
+    set_stage("instagram_api_extractor", "posts 30, 50 of 1000 limit")
+    row = conn.execute("SELECT stage, now() - stage_at > interval '9 minutes' AS kept FROM jobs WHERE id = %s",
+                       (job["id"],)).fetchone()
+    assert row["stage"] == "instagram_api_extractor: posts 30, 50 of 1000 limit"
+    assert row["kept"]  # still timed from the step's start
+    set_stage("storing", "media 1 of 10")
+    assert steps(conn, job["id"]) == [(1, "instagram_api_extractor", True), (1, "storing", False)]
+
+
+def test_finishing_ends_the_last_step(conn, monkeypatch):
+    job = start_work(conn, add_sheet(conn), 2, monkeypatch)
+    set_stage("html_formatter")
+    finish(conn, job, "done", "wacz: success")
+    assert steps(conn, job["id"]) == [(1, "html_formatter", True)]
+
+
+def test_a_killed_attempt_leaves_its_step_open(conn, monkeypatch):
+    job = start_work(conn, add_sheet(conn), 2, monkeypatch)
+    set_stage("wacz_extractor_enricher")
+    conn.execute("UPDATE job_stages SET started_at = now() - interval '1 minute'")
+    db.release_worker_jobs(conn, "worker41")
+    from auto_archiver.job_queue import stage
+
+    stage._step = None  # the new attempt is a new archiver process
+    job = db.claim_job(conn, "worker41")
+    conn.execute("UPDATE jobs SET work_started_at = now() WHERE id = %s", (job["id"],))
+    set_stage("instagram_api_extractor")
+    set_stage("hash_enricher")
+    # the release gave the attempt back, so both attempts are 1
+    assert steps(conn, job["id"]) == [
+        (1, "wacz_extractor_enricher", False),
+        (1, "instagram_api_extractor", True),
+        (1, "hash_enricher", False),
+    ]
+
+
+def test_peaks_keep_the_lowest_memory_and_disk_of_the_jobs_own_worker(conn):
+    job = run_job(conn, add_sheet(conn), 2, "site1.com")
+    db.record_peaks(conn, job["id"], "worker41", {"mem_available_bytes": 3 * GB, "disk_free_bytes": 5 * GB})
+    db.record_peaks(conn, job["id"], "worker41", {"mem_available_bytes": 2 * GB, "disk_free_bytes": 9 * GB})
+    db.record_peaks(conn, job["id"], "worker42", {"mem_available_bytes": 1, "disk_free_bytes": 1})  # not its worker
+    row = conn.execute("SELECT * FROM jobs WHERE id = %s", (job["id"],)).fetchone()
+    assert (row["min_mem_available_bytes"], row["min_disk_free_bytes"]) == (2 * GB, 5 * GB)
 
 
 def test_finished_jobs_show_the_sheet_status_and_blocks_are_yellow(conn):
@@ -178,7 +290,7 @@ def test_a_worker_shows_its_code_and_machine(conn):
     assert f"code {GREEN}abc1234" in screen
     assert f"code {RED}old5678" in screen  # missed a deploy
     assert f"code {YELLOW}?" in screen
-    assert f"disk {GREEN}20.0 GB{dashboard.RESET} free, memory {GREEN}2.0 of 4.0 GB{dashboard.RESET} free" in screen
+    assert f"disk {GREEN}20.0 GB{dashboard.RESET} free, memory {GREEN}[█████░░░░░] 2.0 GB used, 2.0 GB{dashboard.RESET} available" in screen
     assert f"disk {RED}3.0 GB" in screen
     assert "cpu, disk, memory and swap ?" in screen
 
@@ -187,8 +299,8 @@ def test_a_worker_shows_its_code_and_machine(conn):
     "stats, expected",
     [
         ({"disk_free_bytes": 8 * GB}, f"disk {YELLOW}8.0 GB"),
-        ({"mem_available_bytes": GB // 2}, f"memory {YELLOW}0.5 of 4.0 GB"),
-        ({"mem_available_bytes": GB // 5}, f"memory {RED}0.2 of 4.0 GB"),
+        ({"mem_available_bytes": GB // 2}, f"memory {YELLOW}[█████████░] 3.5 GB used, 0.5 GB"),
+        ({"mem_available_bytes": GB // 5}, f"memory {RED}[██████████] 3.8 GB used, 0.2 GB"),
         ({"swap_used_bytes": 2 * GB}, f"swap {YELLOW}2048 MB"),
         ({"cpu_percent": 12.3}, f"cpu {GREEN}12%"),
         ({"cpu_percent": 95.0}, f"cpu {YELLOW}95%"),
@@ -240,9 +352,23 @@ def test_storage_totals_files_and_flags_failures(conn):
         result={"store_failures": 2},
         files=[{"role": "", "key": "a/1.mp4", "bytes": GB}, {"role": "screenshot", "key": "a/2.png", "bytes": GB}],
     )
-    line = dashboard.storage(conn)[0]
-    assert "Storage (24h): 2 files, 2.00 GB stored" in line
-    assert f"{RED}1 job(s) with files that couldn't be stored: job {job['id']} (2)" in line
+    other_sheet = add_sheet(conn, gid=2)
+    conn.execute("UPDATE sheets SET worksheet = 'tab2' WHERE id = %s", (other_sheet,))
+    other_job = run_job(conn, other_sheet, 2, "site2.com")
+    db.finish_job(
+        conn,
+        other_job["id"],
+        other_job["lease_token"],
+        "done",
+        {"status": "wacz: success"},
+        files=[{"role": "", "key": "b/1.mp4", "bytes": 3 * GB}],
+    )
+    lines = dashboard.storage(conn)
+    assert "Storage (24h): 3 files, 5.00 GB stored" in lines[0]
+    assert f"{RED}1 job(s) with files that couldn't be stored: job {job['id']} (2)" in lines[0]
+    # a line per tab, biggest first
+    assert lines[1].split() == ["Sheet", "A/tab2", "1", "files", "3.00", "GB"]
+    assert lines[2].split() == ["Sheet", "A/tab1", "2", "files", "2.00", "GB"]
 
 
 def test_failures_lists_only_failed_and_blocked_jobs(conn):

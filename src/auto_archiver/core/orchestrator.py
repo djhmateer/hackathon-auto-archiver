@@ -47,6 +47,7 @@ from .module import ModuleFactory, LazyBaseModule
 from . import validators, Feeder, Extractor, Database, Storage, Formatter, Enricher
 from .consts import MODULE_TYPES, SetupError
 from auto_archiver.utils.url import check_url_or_raise, clean, domain_for_url
+from auto_archiver.job_queue.stage import set_stage
 
 if TYPE_CHECKING:
     from .base_module import BaseModule
@@ -939,6 +940,7 @@ Here's how that would look: \n\nsteps:\n  extractors:\n  - [your_extractor_name_
         # 3 - call extractors until one succeeds
         for a in extractors:
             logger.info(f"Trying extractor {a.name}")
+            set_stage(a.name)
             try:
                 result.merge(a.download(result))
                 if result.is_success():
@@ -951,6 +953,7 @@ Here's how that would look: \n\nsteps:\n  extractors:\n  - [your_extractor_name_
 
         # 4 - call enrichers to work with archived content
         for e in enrichers:
+            set_stage(e.name)
             try:
                 e.enrich(result)
             except Exception as exc:
@@ -965,6 +968,7 @@ Here's how that would look: \n\nsteps:\n  extractors:\n  - [your_extractor_name_
 
         # 6 - format and store formatted if needed
         final_media: Media
+        set_stage(self.formatters[0].name)
         if final_media := self.formatters[0].format(result):
             final_media.store(url=url, metadata=result, storages=self.storages)
             result.set_final_media(final_media)

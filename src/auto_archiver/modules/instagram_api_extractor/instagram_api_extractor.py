@@ -24,6 +24,7 @@ from tqdm import tqdm
 from auto_archiver.core import Extractor
 from auto_archiver.core import Media
 from auto_archiver.core import Metadata
+from auto_archiver.job_queue.stage import set_stage
 
 
 class InstagramAPIExtractor(Extractor):
@@ -183,6 +184,7 @@ class InstagramAPIExtractor(Extractor):
                 )
                 count_posts += len(stories)
                 result.set("#stories", len(stories))
+                self._set_profile_stage("stories", len(stories), self.full_profile_max_posts)
             except Exception as e:
                 result.append("errors", f"Error downloading stories for {username}")
                 logger.error(f"Error downloading stories for {username}: {e} {traceback.format_exc()}")
@@ -222,6 +224,17 @@ class InstagramAPIExtractor(Extractor):
         result.set_url(url)  # reset as scrape_item modifies it
         return result.success("insta profile")
 
+    def _set_profile_stage(self, section: str, count: int, max_to_download: int) -> None:
+        """
+        For the dashboard, eg 'instagram_api_extractor: posts 430, 455 of 1000 limit'. max_to_download is what was left of
+        the profile's limit when this section started, so the profile's total so far is the limit less that, plus count
+        """
+        progress = f"{section} {count}"
+        if self.full_profile_max_posts != math.inf:
+            done = self.full_profile_max_posts - max_to_download + count
+            progress += f", {done} of {self.full_profile_max_posts} limit"
+        set_stage(self.name, progress)
+
     def download_all_highlights(self, result, username, user_id, max_to_download: int) -> int:
         count_highlights = 0
         highlights = self.call_api("v1/user/highlights", {"user_id": user_id})
@@ -238,6 +251,7 @@ class InstagramAPIExtractor(Extractor):
                 logger.error(
                     f"Error downloading highlight id{h.get('pk')} for {username}: {e} {traceback.format_exc()}"
                 )
+            self._set_profile_stage("highlights", count_highlights, max_to_download)
             if count_highlights >= max_to_download:
                 logger.debug(f"HIGHLIGHTS reached max_to_download={self.full_profile_max_posts}")
                 break
@@ -342,6 +356,7 @@ class InstagramAPIExtractor(Extractor):
                     logger.error(f"Error downloading post, skipping {p.get('id')}: {e} {traceback.format_exc()}")
                 pbar.update(1)
                 post_count += 1
+            self._set_profile_stage("posts", post_count, max_to_download)
             if post_count >= max_to_download:
                 logger.info(f"POSTS reached max_to_download={self.full_profile_max_posts}")
                 break
@@ -373,6 +388,7 @@ class InstagramAPIExtractor(Extractor):
                     logger.error(f"Error downloading tagged post, skipping {p.get('id')}: {e} {traceback.format_exc()}")
                 pbar.update(1)
                 tagged_count += 1
+            self._set_profile_stage("tagged posts", tagged_count, max_to_download)
             if tagged_count >= max_to_download:
                 logger.info(f"TAGS reached max_to_download={self.full_profile_max_posts}")
                 break
