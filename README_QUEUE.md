@@ -129,10 +129,10 @@ Then give it a DHCP reservation and an SSH port forward, as for the other worker
 ```bash
 git clone https://github.com/djhmateer/hackathon-auto-archiver.git ~/auto-archiver
 cd ~/auto-archiver
-bash scripts/job_queue/install-worker.sh --coordinator-database <coordinator_ip>
+bash scripts/job_queue/install-worker.sh --coordinator-database <coordinator_ip> --pool <pool>
 ```
 
-Run it as your normal user, not root. It is safe to run again. It installs:
+Run it as your normal user, not root. It is safe to run again. `--pool` is the group of workers it claims jobs for (see [Pools and organisations](#pools-and-organisations)): it adds the worker, by its hostname, to the `workers` table, or moves it if it's already there. It installs:
 
 - Firefox, geckodriver and Chrome
 - Docker, with the browsertrix-crawler and YouTube token containers
@@ -147,7 +147,7 @@ The script enables the `aa-worker-supervisor` service but doesn't start it. Then
 2. **Reboot** with `sudo reboot`. This applies the `docker` group membership and frees the 512 MB of memory that was reserved for crash dumps (the script removes `kdump-tools`).
 3. **Check the log** with `j`, an alias for `journalctl -u aa-worker-supervisor -f`. Look for `Started worker <worker_name>, … daily reboot at 05:20`, followed by `Waiting for jobs: …`. The coordinator logs `Worker <worker_name> is up`.
 4. **Add the worker to `update-os.sh`**, so OS updates reach it.
-5. **Put it in a pool.** On the coordinator, `$Q "INSERT INTO workers (name, pool) VALUES ('<worker_name>', '<pool>')"`. Until then it claims nothing, and the dashboard shows its pool in red. See [Pools and organisations](#pools-and-organisations).
+
 
 Notes:
 

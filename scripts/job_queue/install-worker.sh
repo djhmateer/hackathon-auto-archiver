@@ -4,7 +4,8 @@
 #
 # As your normal user, from a clone of the repo:
 #   git pull origin main
-#   bash scripts/job_queue/install-worker.sh --coordinator-database <coordinator_ip>
+#   bash scripts/job_queue/install-worker.sh --coordinator-database <coordinator_ip> --pool <pool>
+# The pool (eg glan) is the group of workers it claims jobs for. Its name on the queue is its hostname
 set -euo pipefail
 
 DB_NAME=auto_archiver
@@ -12,11 +13,20 @@ DB_USER=bob
 DB_PASSWORD=password
 GECKODRIVER_VERSION=0.37.1
 
-if [ $# -ne 2 ] || [ "$1" != "--coordinator-database" ]; then
-    echo "Usage: bash scripts/job_queue/install-worker.sh --coordinator-database <coordinator_ip>" >&2
+COORDINATOR_IP=""
+POOL=""
+while [ $# -ge 2 ]; do
+    case "$1" in
+        --coordinator-database) COORDINATOR_IP="$2" ;;
+        --pool) POOL="$2" ;;
+        *) break ;;
+    esac
+    shift 2
+done
+if [ $# -ne 0 ] || [ -z "$COORDINATOR_IP" ] || [ -z "$POOL" ]; then
+    echo "Usage: bash scripts/job_queue/install-worker.sh --coordinator-database <coordinator_ip> --pool <pool>" >&2
     exit 1
 fi
-COORDINATOR_IP="$2"
 
 REPO="$(cd "$(dirname "$0")/../.." && pwd)"
 cd "$REPO"
@@ -111,6 +121,21 @@ sys.exit(1 if pending or problems else 0)
     exit 1
 fi
 echo "Connected, and migrations match"
+
+echo "=== Joining pool $POOL as $(hostname)"
+poetry run python -c "
+import socket, sys
+from auto_archiver.job_queue import db
+pool = sys.argv[1]
+with db.connect() as conn:
+    pools = [row['name'] for row in conn.execute('SELECT name FROM pools ORDER BY name')]
+    if pool not in pools:
+        sys.exit(f'There is no pool {pool}. The pools are: {\", \".join(pools)}')
+    conn.execute(
+        'INSERT INTO workers (name, pool) VALUES (%s, %s) ON CONFLICT (name) DO UPDATE SET pool = EXCLUDED.pool',
+        (socket.gethostname(), pool),
+    )
+" "$POOL"
 
 echo "=== Daily reboot"
 sudoers_line="$USER ALL=(root) NOPASSWD: /sbin/reboot"
