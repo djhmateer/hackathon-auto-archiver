@@ -38,9 +38,9 @@ done
 # DM 10th Nov 26 - the cookies, sessions and browser profile the archiver uses, so a refreshed cookie or a new worker
 # gets them from your local secrets/, which is the master copy (the workers never change them). rsync only sends a file
 # whose size or time differs, so the 150 MB profile isn't sent every deploy. The workers don't need the service accounts
-# DM 10th Nov 26 - and the Google Drive OAuth tokens the CIR configs store with (jobs failed in setup without them).
-# A worker rewrites its copy when it refreshes the token; overwriting that with yours is harmless, it just refreshes again
-SECRETS="secrets/anon.session secrets/profile.tar.gz secrets/www.facebook.com_cookies.txt secrets/x.com_cookies.txt secrets/token-cir-*.json"
+# DM 10th Nov 26 - and the Google Drive OAuth tokens the CIR configs store with (jobs failed in setup without them;
+# Indigo and CIR Projects use token-dataac). A worker rewrites its copy when it refreshes the token; overwriting that with yours is harmless, it just refreshes again
+SECRETS="secrets/anon.session secrets/profile.tar.gz secrets/www.facebook.com_cookies.txt secrets/x.com_cookies.txt secrets/token-cir-*.json secrets/token-dataac.json"
 for SECRETS_PORT in $PORTS; do
     echo "== Copying any changed secrets to $HOST port $SECRETS_PORT"
     rsync -tp --itemize-changes -e "ssh -p $SECRETS_PORT" $SECRETS "$HOST:/home/dave/auto-archiver/secrets/"
