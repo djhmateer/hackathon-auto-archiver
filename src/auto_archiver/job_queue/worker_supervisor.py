@@ -11,6 +11,7 @@ import argparse
 import ctypes
 import glob
 import os
+import re
 import shutil
 import signal
 import socket
@@ -42,6 +43,24 @@ CONSOLE_KEEP_DAYS = 14
 
 def console_log(worker_dir: str, job_id: int) -> str:
     return os.path.join(worker_dir, CONSOLE_DIR, f"job_{job_id}.log")
+
+
+def last_error_line(path: str) -> str | None:
+    """
+    The last exception line of the latest attempt in a console log, eg "FileNotFoundError: ... 'secrets/token.json'",
+    or None. Only the latest attempt's, as the log is appended, and a child that was killed may have printed none
+    """
+    error = None
+    try:
+        with open(path, errors="replace") as f:
+            for line in f:
+                if line.startswith("===== "):
+                    error = None
+                elif re.match(r"[\w.]+(Error|Exception): ", line):
+                    error = line.strip()[:300]
+    except OSError:
+        return None
+    return error
 
 
 def prune_console_logs(worker_dir: str) -> None:
@@ -308,7 +327,8 @@ class WorkerSupervisor:
             logger.error(
                 f"Job {job['id']} exited during setup with code {code}, see {console_log(self.dir, job['id'])}"
             )
-            db.release_setup_failure(conn, job["id"], job["lease_token"])
+            error = last_error_line(console_log(self.dir, job["id"])) or f"exited with code {code}"
+            db.release_setup_failure(conn, job["id"], job["lease_token"], error)
             self._record_quick_failure(job["sheet_id"], conn)
         else:
             logger.error(f"Job {job['id']} exited without saving a result")
@@ -403,9 +423,9 @@ class WorkerSupervisor:
         run_docker("rm", "-f", f"aa-job-{job['id']}")  # a retry reuses the name
         try:
             process = self.start(job, self.dir)
-        except Exception:
+        except Exception as e:
             # nothing is running it, so don't leave it waiting for its lease to expire
-            db.release_setup_failure(conn, job["id"], job["lease_token"])
+            db.release_setup_failure(conn, job["id"], job["lease_token"], f"could not start: {e}")
             raise
         self.running = RunningJob(job, process, self.clock(), self.clock())
         self.idle_logged = None  # so going idle again after this job is logged

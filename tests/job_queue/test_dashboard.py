@@ -232,6 +232,16 @@ def test_waiting_jobs_say_why(conn):
     assert "free.com" not in screen
 
 
+def test_waiting_jobs_on_a_paused_sheet_show_its_setup_error(conn):
+    sheet_id = add_sheet(conn)
+    add_job(conn, sheet_id, 2, "site1.com")
+    conn.execute(
+        "UPDATE sheets SET paused_until = now() + interval '15 minutes', setup_error = 'ValueError: bad config'"
+    )
+    screen = "\n".join(dashboard.waiting(conn))
+    assert "row 2 site1.com: " + YELLOW + "sheet is paused, its jobs fail in setup: ValueError: bad config" in screen
+
+
 def test_waiting_jobs_with_no_organisation_or_pool_worker_say_so(conn):
     no_org = add_sheet(conn, gid=1)
     conn.execute("UPDATE sheets SET organisation_id = NULL WHERE id = %s", (no_org,))

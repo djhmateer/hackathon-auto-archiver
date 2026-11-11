@@ -239,6 +239,37 @@ def test_exit_during_setup_logs_the_exit_code(conn, make_supervisor, children, c
     assert "exited during setup with code -11" in caplog.text
 
 
+def test_exit_during_setup_saves_the_error_from_its_console_log(conn, make_supervisor, children, tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    sheet_id = add_sheet(conn)
+    job_id = add_job(conn, sheet_id)
+    sup = make_supervisor()
+    sup.tick(conn)
+    log = worker_supervisor.console_log(str(tmp_path), job_id)
+    os.makedirs(os.path.dirname(log), exist_ok=True)
+    with open(log, "w") as f:
+        f.write('Traceback (most recent call last):\n  File "x.py", line 1\n')
+        f.write("FileNotFoundError: [Errno 2] No such file or directory: 'secrets/token-example.json'\n\n")
+    children[0].exit_code = 1
+    sup.tick(conn)
+    error = conn.execute("SELECT setup_error FROM sheets WHERE id = %s", (sheet_id,)).fetchone()["setup_error"]
+    assert error == "FileNotFoundError: [Errno 2] No such file or directory: 'secrets/token-example.json'"
+
+
+def test_exit_during_setup_with_no_console_log_saves_the_exit_code(
+    conn, make_supervisor, children, tmp_path, monkeypatch
+):
+    monkeypatch.chdir(tmp_path)
+    sheet_id = add_sheet(conn)
+    add_job(conn, sheet_id)
+    sup = make_supervisor()
+    sup.tick(conn)
+    children[0].exit_code = -9
+    sup.tick(conn)
+    error = conn.execute("SELECT setup_error FROM sheets WHERE id = %s", (sheet_id,)).fetchone()["setup_error"]
+    assert error == "exited with code -9"
+
+
 def test_clean_finish_lets_it_claim_the_next_job(conn, make_supervisor, children, caplog):
     sheet = add_sheet(conn)
     first = add_job(conn, sheet, 2)
@@ -693,6 +724,19 @@ def test_cpu_percent_is_none_at_first_then_a_percentage(monkeypatch):
         pass
     percent = worker_supervisor.cpu_percent()
     assert percent is None or 0 <= percent <= 100
+
+
+def test_last_error_line_is_only_from_the_latest_attempt(tmp_path):
+    log = tmp_path / "job_1.log"
+    log.write_text(
+        "===== job 1 attempt 1 started\nTraceback (most recent call last):\nValueError: first\nKeyError: 'second'\n"
+    )
+    assert worker_supervisor.last_error_line(str(log)) == "KeyError: 'second'"
+    # a retry killed before it printed anything
+    with log.open("a") as f:
+        f.write("===== job 1 attempt 2 started\n")
+    assert worker_supervisor.last_error_line(str(log)) is None
+    assert worker_supervisor.last_error_line(str(tmp_path / "missing.log")) is None
 
 
 def test_console_logs_older_than_the_keep_days_are_pruned(tmp_path):

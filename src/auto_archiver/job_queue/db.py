@@ -525,7 +525,7 @@ def mark_work_started(conn: psycopg.Connection, job_id: int, lease_token: str) -
         if job is None:
             return False
         conn.execute(
-            "UPDATE sheets SET setup_failures = 0, paused_until = NULL WHERE id = %s",
+            "UPDATE sheets SET setup_failures = 0, paused_until = NULL, setup_error = NULL WHERE id = %s",
             (job["sheet_id"],),
         )
     return True
@@ -645,11 +645,11 @@ def release_worker_jobs(conn: psycopg.Connection, worker: str) -> list[dict]:
     ).fetchall()
 
 
-def release_setup_failure(conn: psycopg.Connection, job_id: int, lease_token: str) -> bool:
+def release_setup_failure(conn: psycopg.Connection, job_id: int, lease_token: str, error: str) -> bool:
     """
     The child exited before work started, so the fault is in a config or VM rather than the row: requeue the job and
     give back its attempt. A sheet is paused at MAX_SETUP_FAILURES with one alert, and while it stays broken each
-    further failure pauses it again with no new alert.
+    further failure pauses it again with no new alert. error (eg the exception line) is saved for the dashboard.
     False means this worker no longer has the job, and nothing was changed
     """
     with conn.transaction():
@@ -667,13 +667,13 @@ def release_setup_failure(conn: psycopg.Connection, job_id: int, lease_token: st
             return False
         sheet = conn.execute(
             """
-            UPDATE sheets SET setup_failures = setup_failures + 1,
+            UPDATE sheets SET setup_failures = setup_failures + 1, setup_error = %s,
                 paused_until = CASE WHEN setup_failures + 1 >= %s THEN now() + interval '15 minutes'
                                     ELSE paused_until END
             WHERE id = %s
             RETURNING id, setup_failures
             """,
-            (MAX_SETUP_FAILURES, job["sheet_id"]),
+            (error, MAX_SETUP_FAILURES, job["sheet_id"]),
         ).fetchone()
         if sheet["setup_failures"] == MAX_SETUP_FAILURES:
             add_alert(conn, "sheet_paused", f"Sheet {sheet['id']} paused after {MAX_SETUP_FAILURES} setup failures")

@@ -377,7 +377,7 @@ def test_cancelling_a_job_requeued_after_a_claim_clears_the_row(conn, sheet_id, 
     job = claim(conn)
     run_writer(conn, sheet)
     assert cell(tab, "B2") == "Archive in progress (vm1)"
-    db.release_setup_failure(conn, job["id"], job["lease_token"])
+    db.release_setup_failure(conn, job["id"], job["lease_token"], "ValueError: bad config")
     assert db.cancel_job(conn, job["id"])
     run_writer(conn, sheet)
     assert cell(tab, "B2") == ""

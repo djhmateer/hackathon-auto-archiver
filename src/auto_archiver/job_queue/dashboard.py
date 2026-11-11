@@ -371,7 +371,7 @@ def waiting(conn) -> list[str]:
     """Queued jobs that can't be claimed right now, and why"""
     rows = conn.execute(
         """
-        SELECT j.id, j.row_number, j.domain, j.attempts, j.available_at, s.spreadsheet_name, s.worksheet,
+        SELECT j.id, j.row_number, j.domain, j.attempts, j.available_at, s.spreadsheet_name, s.worksheet, s.setup_error,
             CASE
                 WHEN NOT s.enabled THEN 'sheet is off'
                 WHEN s.organisation_id IS NULL THEN 'sheet has no organisation, so no pool'
@@ -398,6 +398,8 @@ def waiting(conn) -> list[str]:
         reason = row["reason"]
         if reason == "retry":
             reason = f"retry at {row['available_at']:%H:%M} UTC, attempt {row['attempts'] + 1}"
+        elif reason == "sheet is paused" and row["setup_error"]:
+            reason = f"sheet is paused, its jobs fail in setup: {row['setup_error']}"
         lines.append(f"  job {row['id']} {tab(row)} row {row['row_number']} {row['domain']}: {colour(YELLOW, reason)}")
     return lines
 

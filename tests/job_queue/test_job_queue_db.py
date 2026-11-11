@@ -315,7 +315,7 @@ def test_replaced_worker_cannot_renew_or_save(conn):
 
     assert db.renew_lease(conn, job_id, old["lease_token"]) is False
     assert db.finish_job(conn, job_id, old["lease_token"], "done", {"status": "old"}) is False
-    assert db.release_setup_failure(conn, job_id, old["lease_token"]) is False
+    assert db.release_setup_failure(conn, job_id, old["lease_token"], "ValueError: bad config") is False
     assert db.mark_work_started(conn, job_id, old["lease_token"]) is False
 
     now = job(conn, job_id)
@@ -439,7 +439,7 @@ def test_cleanup_fails_the_job_after_three_attempts(conn):
 def test_setup_failure_gives_back_the_attempt_with_a_delay(conn):
     job_id = add_job(conn, add_sheet(conn))
     token = db.claim_job(conn, "vm1")["lease_token"]
-    assert db.release_setup_failure(conn, job_id, token) is True
+    assert db.release_setup_failure(conn, job_id, token, "ValueError: bad config") is True
 
     released = job(conn, job_id)
     assert released["status"] == "queued"
@@ -451,7 +451,7 @@ def test_setup_failure_gives_back_the_attempt_with_a_delay(conn):
 def test_reclaim_after_setup_failure_adds_no_second_in_progress(conn):
     job_id = add_job(conn, add_sheet(conn))
     token = db.claim_job(conn, "vm1")["lease_token"]
-    db.release_setup_failure(conn, job_id, token)
+    db.release_setup_failure(conn, job_id, token, "ValueError: bad config")
     make_available(conn, job_id)
     assert db.claim_job(conn, "vm1")["attempts"] == 1
     statuses = [e["cells"]["status"] for e in sheet_writes(conn, job_id)]
@@ -462,7 +462,7 @@ def test_setup_failure_is_refused_once_work_has_started(conn):
     job_id = add_job(conn, add_sheet(conn))
     token = db.claim_job(conn, "vm1")["lease_token"]
     assert db.mark_work_started(conn, job_id, token) is True
-    assert db.release_setup_failure(conn, job_id, token) is False
+    assert db.release_setup_failure(conn, job_id, token, "ValueError: bad config") is False
     assert job(conn, job_id)["status"] == "running"
 
 
@@ -470,7 +470,7 @@ def fail_setup(conn, job_id):
     make_available(conn, job_id)
     conn.execute("UPDATE sheets SET paused_until = NULL")
     token = db.claim_job(conn, "vm1")["lease_token"]
-    db.release_setup_failure(conn, job_id, token)
+    db.release_setup_failure(conn, job_id, token, "ValueError: bad config")
 
 
 def alerts(conn) -> list[dict]:
@@ -492,6 +492,7 @@ def test_sheet_pauses_at_three_setup_failures_with_one_alert(conn):
 
     fail_setup(conn, job_id)
     assert sheet_row(conn, sheet)["paused_until"] is not None
+    assert sheet_row(conn, sheet)["setup_error"] == "ValueError: bad config"
     assert [a["kind"] for a in alerts(conn)] == ["sheet_paused"]
 
     # still broken: paused again by each failure, with no more alerts
@@ -525,6 +526,7 @@ def test_getting_past_setup_clears_the_failures(conn):
     row = sheet_row(conn, sheet)
     assert row["setup_failures"] == 0
     assert row["paused_until"] is None
+    assert row["setup_error"] is None
 
 
 # the connection string
