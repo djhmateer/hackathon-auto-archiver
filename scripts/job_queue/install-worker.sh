@@ -50,6 +50,16 @@ echo "=== No crash dumps, which would reserve 512 MB of a 4 GB VM's RAM. Applies
 sudo apt-get purge -y kdump-tools
 sudo update-grub
 
+echo "=== 4 GB swap, up from Ubuntu's 2 GB, as headroom for a big job on a 4 GB VM"
+# the installer's /etc/fstab line already points at /swap.img
+if [ "$(stat -c %s /swap.img 2>/dev/null)" != "$((4 * 1024 * 1024 * 1024))" ]; then
+    sudo swapoff /swap.img 2>/dev/null || true
+    sudo fallocate -l 4G /swap.img
+    sudo chmod 600 /swap.img
+    sudo mkswap /swap.img
+    sudo swapon /swap.img
+fi
+
 echo "=== Firefox and geckodriver, for screenshots"
 # Ubuntu's own firefox package is a snap, so use Mozilla's, and pin it above Ubuntu's
 wget -qO- https://packages.mozilla.org/apt/repo-signing-key.gpg | sudo tee /etc/apt/keyrings/packages.mozilla.org.asc >/dev/null

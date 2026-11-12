@@ -103,9 +103,11 @@ class WaybackExtractorEnricher(Enricher, Extractor):
                     "error:blocked-url",
                     "error:invalid-host-resolution",
                     "error:host-crawling-paused",
+                    "error:too-many-daily-captures",
                 ):
-                    # URL is on the IA Save Page Now block list, IA can't resolve the host (eg archive.is), or IA has
-                    # paused crawling the host - not a problem with this code
+                    # URL is on the IA Save Page Now block list, IA can't resolve the host (eg archive.is), IA has
+                    # paused crawling the host, or IA has already captured the URL its daily maximum of times - not a
+                    # problem with this code
                     logger.warning(f"Wayback failed with {r.json()}")
                     return False
                 else:
