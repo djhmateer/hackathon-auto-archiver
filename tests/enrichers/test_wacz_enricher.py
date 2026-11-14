@@ -1546,3 +1546,28 @@ def test_facebook_crawl_has_no_name_outside_the_queue(wacz_enricher, mocker, tmp
     mock_run = mocker.patch("subprocess.run")
     wacz_enricher._fb_browsertrix_crawl("https://example.com/photo", "1")
     assert "--name" not in mock_run.call_args[0][0]
+
+
+def test_main_crawl_has_a_memory_cap(wacz_enricher, mocker, tmp_path):
+    cmd = _crawl_with_main_path(wacz_enricher, mocker, tmp_path)
+    assert cmd[cmd.index("--memory") + 1] == "4500m"
+    assert cmd[cmd.index("--memory-swap") + 1] == "5500m"
+    assert cmd.index("--memory") < cmd.index("webrecorder/browsertrix-crawler")
+
+
+def test_facebook_crawl_has_a_memory_cap(wacz_enricher, mocker, tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    mock_run = mocker.patch("subprocess.run")
+    wacz_enricher._fb_browsertrix_crawl("https://example.com/photo", "1")
+    cmd = mock_run.call_args[0][0]
+    assert cmd.index("--memory") < cmd.index("webrecorder/browsertrix-crawler")
+
+
+def test_crawl_killed_by_memory_cap_is_in_the_status(wacz_enricher, mocker, tmp_path):
+    import subprocess
+
+    wacz_enricher.tmp_dir = str(tmp_path)
+    mocker.patch("subprocess.run", side_effect=subprocess.CalledProcessError(137, ["docker"], output="", stderr=""))
+    metadata = Metadata().set_url("https://example.com")
+    assert wacz_enricher.enrich(metadata) is False
+    assert "WACZ crawl hit memory cap" in metadata.get_status_notes()

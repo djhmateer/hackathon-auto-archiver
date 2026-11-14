@@ -26,6 +26,12 @@ NOTIFICATION_COUNT_PREFIX = re.compile(r"^\(\d+\)\s*")
 # DM 1st Oct 26 - browsertrix-crawler warnings that show up on most failed (and successful) crawls, so say nothing
 # about why the crawl failed - kept out of the one-line failure reason the dashboard shows
 CRAWLER_NOISE_MESSAGE = re.compile(r"^(ioredis error|Waiting for redis\b|Page date missing\b)")
+# DM 13th Nov 26 - cap the crawler container so a runaway crawl (some x.com threads took ~4.6 GB on a 4 GB worker)
+# is OOM-killed on its own rather than swapping the whole VM. 4500 MB of RAM plus 1000 MB of swap, sized for 6 GB
+# workers. A kill of the crawler's main process exits 137; a kill of just a Chrome tab shows only in the kernel log
+# ("Memory cgroup out of memory")
+CRAWLER_MEMORY_MB = 4500
+CRAWLER_MEMORY_LIMIT = ["--memory", f"{CRAWLER_MEMORY_MB}m", "--memory-swap", f"{CRAWLER_MEMORY_MB + 1000}m"]
 # photo route in a bulk-route-definitions request body: fb_id, then the raw set value if there is one, then whether
 # another param (%26) follows the set. eg
 #   photo%2F%3Ffbid%3D1646726009098072%26set%3Dpcb.1646726145764725%26  - post carousel
@@ -215,6 +221,7 @@ class WaczExtractorEnricher(Enricher, Extractor):
                     "run",
                     "--rm",
                     *(["--name", f"aa-job-{job_id}"] if job_id else []),
+                    *CRAWLER_MEMORY_LIMIT,
                     "-v",
                     f"{browsertrix_home_host}:/crawls/",
                     "-e",
@@ -253,6 +260,9 @@ class WaczExtractorEnricher(Enricher, Extractor):
             # DM 28th Sep 26 - put the crawler's reason on the first line as the dashboard only shows that
             reason = self._crawler_failure_reason(e.stdout, e.stderr) or "no crawler output"
             logger.error(f"WACZ generation failed (exit status {e.returncode}) for {url}: {reason}")
+            if e.returncode == 137:
+                logger.error(f"browsertrix-crawler was killed, most likely by its {CRAWLER_MEMORY_MB} MB memory cap")
+                to_enrich.add_status_note("WACZ crawl hit memory cap")
             if crawler_log := self._summarise_crawler_output(e.stdout, e.stderr):
                 logger.error(f"browsertrix-crawler output:\n{crawler_log}")
             if (status := self._crawler_rate_limited_status(e.stdout, e.stderr)) is not None:
@@ -1316,7 +1326,7 @@ class WaczExtractorEnricher(Enricher, Extractor):
             # named like the main crawl, for the queue's supervisor to remove. These crawls run one at a time
             job_id = os.environ.get("AA_JOB_ID")
             name = ["--name", f"aa-job-{job_id}"] if job_id else []
-            docker_commands = ["docker", "run", "--rm", *name, "-v", f"{browsertrix_home}:/crawls/", "webrecorder/browsertrix-crawler"]
+            docker_commands = ["docker", "run", "--rm", *name, *CRAWLER_MEMORY_LIMIT, "-v", f"{browsertrix_home}:/crawls/", "webrecorder/browsertrix-crawler"]
             cmd = docker_commands + [
                 "crawl",
                 "--url", url_build,
@@ -1343,6 +1353,8 @@ class WaczExtractorEnricher(Enricher, Extractor):
                 subprocess.run(cmd, check=True, capture_output=True, text=True)
             except subprocess.CalledProcessError as e:
                 logger.error(f"WACZ generation failed: {e}")
+                if e.returncode == 137:
+                    logger.error(f"browsertrix-crawler was killed, most likely by its {CRAWLER_MEMORY_MB} MB memory cap")
                 if crawler_log := self._summarise_crawler_output(e.stdout, e.stderr):
                     logger.error(f"browsertrix-crawler output:\n{crawler_log}")
                 logger.debug(f"FB crawl {current_fb_id=} failed after {time.perf_counter() - crawl_start:.0f}s")

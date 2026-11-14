@@ -110,7 +110,9 @@ Postgres accepts remote connections only from subnets the VM is directly attache
 
 Target: Ubuntu 26.04.
 
-To make the VM on Proxmox, run `scripts/job_queue/new-worker-vm.sh` as root on the Proxmox host. It makes a full clone of the Ubuntu 26.04 template (VM 1001), with the memory and cores of an existing worker and a 64 GB disk, and starts it. Set `STORAGE=vm-storage` to put its disks there.
+To make the VM on Proxmox, run `scripts/job_queue/new-worker-vm.sh` as root on the Proxmox host. It makes a full clone of the Ubuntu 26.04 template (VM 1001), with 6 GB of memory, the cores of an existing worker and a 64 GB disk, and starts it. Set `STORAGE=vm-storage` to put its disks there.
+
+To change the workers' Proxmox hardware later (eg `qm set <vmid> --memory 6144`), run `scripts/job_queue/restart-worker-vms.sh` as root on the Proxmox host. A reboot from inside the VM, like the daily one, leaves the change pending. It shuts down and starts each worker VM in turn (341 to 347, or the ids you give it), and refuses any VM whose name doesn't contain `worker`. A job running on a VM as it goes down is killed and retried, so run it when the queue is quiet.
 
 The template was installed from the ISO, so cloud-init is off and the clone is still a copy of it: its hostname, machine-id (which is also its DHCP client id) and SSH host keys, and a 15 GB `/`. The hostname is the worker's name on the queue. So before anything else, on the new VM, run `scripts/job_queue/prepare-clone.sh <worker_name>` and reboot. It sets the hostname, makes a new machine-id and SSH host keys, and grows `/` to fill the disk.
 

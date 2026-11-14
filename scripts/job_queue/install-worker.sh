@@ -46,11 +46,11 @@ sudo install -m 0755 -d /etc/apt/keyrings
 echo "=== sysstat, every minute"
 bash scripts/job_queue/setup-sysstat.sh
 
-echo "=== No crash dumps, which would reserve 512 MB of a 4 GB VM's RAM. Applies from the reboot"
+echo "=== No crash dumps, which would reserve 512 MB of the VM's RAM. Applies from the reboot"
 sudo apt-get purge -y kdump-tools
 sudo update-grub
 
-echo "=== 4 GB swap, up from Ubuntu's 2 GB, as headroom for a big job on a 4 GB VM"
+echo "=== 4 GB swap, up from Ubuntu's 2 GB, as headroom for a big job"
 # the installer's /etc/fstab line already points at /swap.img
 if [ "$(stat -c %s /swap.img 2>/dev/null)" != "$((4 * 1024 * 1024 * 1024))" ]; then
     sudo swapoff /swap.img 2>/dev/null || true

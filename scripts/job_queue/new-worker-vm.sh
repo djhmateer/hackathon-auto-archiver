@@ -8,9 +8,12 @@
 set -euo pipefail
 
 TEMPLATE_ID="${TEMPLATE_ID:-1001}"  # ubuntu-26-04
-LIKE_ID="${LIKE_ID:-343}"           # an existing worker, for its memory and cores
+LIKE_ID="${LIKE_ID:-343}"           # an existing worker, for its cores
 STORAGE="${STORAGE:-}"              # eg vm-storage. Empty: the same storage as the template's disks
 DISK_SIZE=64G
+# DM 13th Nov 26 - 6 GB, up from 4 GB: some x.com crawls take ~4.6 GB, and the crawler's container is capped at
+# 4.5 GB (CRAWLER_MEMORY_MB in wacz_extractor_enricher.py)
+MEMORY=6144
 
 if [ $# -ne 2 ]; then
     echo "Usage: bash new-worker-vm.sh <new_vmid> <name>" >&2
@@ -19,9 +22,8 @@ fi
 vmid="$1"
 name="$2"
 
-like="$(qm config "$LIKE_ID")"
-memory="$(echo "$like" | sed -n 's/^memory: //p')"
-cores="$(echo "$like" | sed -n 's/^cores: //p')"
+memory="$MEMORY"
+cores="$(qm config "$LIKE_ID" | sed -n 's/^cores: //p')"
 
 # a full clone, so it doesn't depend on the template's disk
 qm clone "$TEMPLATE_ID" "$vmid" --name "$name" --full ${STORAGE:+--storage "$STORAGE"}
