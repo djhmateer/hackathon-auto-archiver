@@ -176,7 +176,8 @@ Both scripts install Python packages exactly as pinned in the committed `poetry.
 
 ```bash
 bash scripts/job_queue/deploy-coordinator.sh                         # stop, pull, sync packages, back up, migrate, start
-bash scripts/job_queue/deploy-coordinator.sh --reset-except-sheets   # the same, then empty the queue
+
+# bash scripts/job_queue/deploy-coordinator.sh ***CAREFUL*** --reset-except-sheets   # the same, then empty the queue
 ```
 
 Before stopping the coordinator, it also copies the three alert email settings from your `.env` into the coordinator's `.env`, replacing any older copies. It keeps the coordinator's own `AA_DATABASE_URL`, and stops if any of the three is missing from your `.env`. It never prints their values.
