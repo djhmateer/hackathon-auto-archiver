@@ -31,6 +31,23 @@ RETRY_DELAYS_SECONDS = (5, 15, 30, 60, 60, 60, 60)
 EMAIL_WHEN_BLOCKED = {"idf.il"}
 
 
+def job_outcome(item: Metadata) -> str:
+    """
+    What the archive achieved, for jobs.outcome (see migration 014), from the status and notes the sheet's status text
+    is built from: success, partial (archived, with a known issue noted), blocked or nothing_archived
+    """
+    notes = item.get_status_notes()
+    if any(note.startswith("site returned HTTP") for note in notes):
+        return "nothing_archived"
+    if not item.is_success():
+        # not 'screenshot blocked by site', as that's only the screenshot
+        blocked = any(note.startswith("blocked by") or note == "aa IP blocked" for note in notes)
+        return "blocked" if blocked else "nothing_archived"
+    if notes or item.get_store_failures():
+        return "partial"
+    return "success"
+
+
 def describe_result(item: Metadata, cells: dict, cached: bool) -> dict:
     """The job's columns for the dashboard, as db.RESULT_COLUMNS"""
     extractor = item.status.split(": success")[0] if ": success" in (item.status or "") else None
@@ -116,9 +133,13 @@ class QueueFeederDB(Feeder, Database):
         logger.info("STARTED")
         logger.info(f" {self.row_description}")
 
-    def _finish(self, status: str, cells: dict, error: str = None, result: dict = None, files: list = ()) -> None:
+    def _finish(
+        self, status: str, cells: dict, error: str = None, result: dict = None, files: list = (), outcome: str = None
+    ) -> None:
         saved = self._with_database(
-            lambda conn: db.finish_job(conn, self.job_id, self.lease_token, status, cells, error, result, files)
+            lambda conn: db.finish_job(
+                conn, self.job_id, self.lease_token, status, cells, error, result, files, outcome
+            )
         )
         if not saved:
             logger.warning(f"Job {self.job_id} is no longer ours, so this result wasn't saved")
@@ -147,7 +168,7 @@ class QueueFeederDB(Feeder, Database):
             # the stats are extra: losing them mustn't lose the archive's result
             logger.error(f"Couldn't work out the archive's stats, saving the result without them: {e}")
             result, files = None, ()
-        self._finish("done", cells, result=result, files=files)
+        self._finish("done", cells, result=result, files=files, outcome=job_outcome(item))
         self._alert_if_blocked(cells["status"])
 
     def _alert_if_blocked(self, status: str) -> None:

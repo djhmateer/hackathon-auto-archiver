@@ -76,10 +76,36 @@ def test_done_saves_the_result_cells(conn, module, caplog):
     item.set_title("A title")
     module.done(item)
     assert "DONE" in caplog.text
-    assert db.get_job(conn, job["id"])["status"] == "done"
+    assert (db.get_job(conn, job["id"])["status"], db.get_job(conn, job["id"])["outcome"]) == ("done", "success")
     cells = conn.execute("SELECT cells FROM sheet_writes ORDER BY id DESC LIMIT 1").fetchone()["cells"]
     assert cells["status"] == "my-archiver: success"
     assert cells["title"] == "A title"
+
+
+@pytest.mark.parametrize(
+    "extractor, notes, store_failures, outcome",
+    [
+        ("vimeo", [], 0, "success"),
+        ("vimeo", [], 2, "partial"),
+        ("wayback", ["blocked by site - HTTP 403"], 0, "partial"),
+        ("wacz", ["screenshot blocked by site"], 0, "partial"),
+        (None, ["blocked by site - please requeue", "screenshot blocked by site"], 0, "blocked"),
+        (None, ["blocked by Cloudflare challenge"], 0, "blocked"),
+        (None, ["aa IP blocked"], 0, "blocked"),
+        (None, ["screenshot blocked by site"], 0, "nothing_archived"),
+        (None, [], 0, "nothing_archived"),
+        ("wacz", ["site returned HTTP 404"], 0, "nothing_archived"),
+    ],
+)
+def test_job_outcome(extractor, notes, store_failures, outcome):
+    item = Metadata().set_url(URL)
+    if extractor:
+        item.success(extractor)
+    for note in notes:
+        item.add_status_note(note)
+    for n in range(store_failures):
+        item.record_store_failure(f"key{n}")
+    assert queue_feeder_db.job_outcome(item) == outcome
 
 
 def finish_blocked(conn, module, url, note):
@@ -173,7 +199,7 @@ def test_failed_saves_the_reason(conn, module):
     list(module)
     module.failed(Metadata().set_url(URL), "- a reason")
     current = db.get_job(conn, job["id"])
-    assert (current["status"], current["error"]) == ("failed", "- a reason")
+    assert (current["status"], current["error"], current["outcome"]) == ("failed", "- a reason", "failed")
     cells = conn.execute("SELECT cells FROM sheet_writes ORDER BY id DESC LIMIT 1").fetchone()["cells"]
     assert cells["status"] == "Archive failed - a reason"
     assert "date" in cells
@@ -324,6 +350,9 @@ def test_real_child_archives_a_job_end_to_end(conn, run_for_real, tmp_path):
     cells = conn.execute("SELECT cells FROM sheet_writes ORDER BY id DESC LIMIT 1").fetchone()["cells"]
     assert cells["status"] == "fake_extractor: success"
     assert cells["title"] == "A fake title"
+    # each step says what it achieved, for the client's view of the job
+    stages = conn.execute("SELECT step, result FROM job_stages WHERE job_id = %s ORDER BY id", (job_id,)).fetchall()
+    assert ("fake_extractor", "success") in [(s["step"], s["result"]) for s in stages]
 
     # logs in logs/, with the lines the timings use
     debug_log = (tmp_path / "logs" / "1debug.log").read_text()
@@ -345,6 +374,10 @@ def test_real_child_with_a_failing_row_reports_it(conn, run_for_real):
     assert db.get_job(conn, job_id)["status"] == "done"
     cells = conn.execute("SELECT cells FROM sheet_writes ORDER BY id DESC LIMIT 1").fetchone()["cells"]
     assert "success" not in cells["status"]
+    stage = conn.execute(
+        "SELECT result, detail FROM job_stages WHERE job_id = %s AND step = 'fake_extractor'", (job_id,)
+    ).fetchone()
+    assert (stage["result"], stage["detail"]) == ("failed", "error: AssertionError")
 
 
 def test_real_child_with_a_bad_config_is_a_setup_failure(conn, run_for_real, tmp_path):

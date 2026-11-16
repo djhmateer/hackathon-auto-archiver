@@ -558,6 +558,20 @@ def set_stage_progress(conn: psycopg.Connection, job_id: int, stage: str) -> Non
     conn.execute("UPDATE jobs SET stage = %s WHERE id = %s AND status = 'running'", (stage, job_id))
 
 
+def set_stage_result(conn: psycopg.Connection, job_id: int, step: str, result: str, detail: str) -> None:
+    """What the running job's current step achieved, eg ('blocked', 'blocked by site - HTTP 403'). See migration 015"""
+    conn.execute(
+        """
+        UPDATE job_stages SET result = %s, detail = %s
+        WHERE id = (
+            SELECT max(s.id) FROM job_stages s JOIN jobs j ON j.id = s.job_id
+            WHERE s.job_id = %s AND s.step = %s AND s.ended_at IS NULL AND j.status = 'running'
+        )
+        """,
+        (result, detail, job_id, step),
+    )
+
+
 def end_stages(conn: psycopg.Connection, job_id: int) -> None:
     """
     Ends this attempt's open step. Only steps since this attempt started work, as a released attempt gives its attempt
@@ -594,22 +608,25 @@ def finish_job(
     error: str = None,
     result: dict = None,
     files: list[dict] = (),
+    outcome: str = None,
 ) -> bool:
     """
     Saves the result of a job, with status 'done' or 'failed', and its sheet update. result has the RESULT_COLUMNS
-    and each of files the FILE_COLUMNS, for the dashboard. False means this worker no longer has the job, and nothing
-    was saved
+    and each of files the FILE_COLUMNS, for the dashboard. outcome is what a done job achieved (see migration 014),
+    and is always 'failed' for a failed one. False means this worker no longer has the job, and nothing was saved
     """
     result = result or {}
+    if status == "failed":
+        outcome = "failed"
     with conn.transaction():
         job = conn.execute(
             f"""
-            UPDATE jobs SET status = %s, finished_at = now(), lease_until = NULL, error = %s,
+            UPDATE jobs SET status = %s, finished_at = now(), lease_until = NULL, error = %s, outcome = %s,
                 {", ".join(f"{column} = %s" for column in RESULT_COLUMNS)}
             WHERE id = %s AND lease_token = %s AND status = 'running'
             RETURNING attempts
             """,
-            (status, error, *(result.get(column) for column in RESULT_COLUMNS), job_id, lease_token),
+            (status, error, outcome, *(result.get(column) for column in RESULT_COLUMNS), job_id, lease_token),
         ).fetchone()
         if job is None:
             return False
@@ -691,7 +708,8 @@ def requeue_expired(conn: psycopg.Connection) -> tuple[int, int]:
         failed = conn.execute(
             """
             WITH failed AS (
-                UPDATE jobs SET status = 'failed', finished_at = now(), lease_until = NULL, error = %s
+                UPDATE jobs SET status = 'failed', outcome = 'failed', finished_at = now(), lease_until = NULL,
+                    error = %s
                 WHERE status = 'running' AND lease_until < now() - interval '2 minutes' AND attempts >= %s
                 RETURNING id
             )

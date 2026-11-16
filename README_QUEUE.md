@@ -176,8 +176,6 @@ Both scripts install Python packages exactly as pinned in the committed `poetry.
 
 ```bash
 bash scripts/job_queue/deploy-coordinator.sh                         # stop, pull, sync packages, back up, migrate, start
-
-# bash scripts/job_queue/deploy-coordinator.sh ***CAREFUL*** --reset-except-sheets   # the same, then empty the queue
 ```
 
 Before stopping the coordinator, it also copies the three alert email settings from your `.env` into the coordinator's `.env`, replacing any older copies. It keeps the coordinator's own `AA_DATABASE_URL`, and stops if any of the three is missing from your `.env`. It never prints their values.
@@ -185,12 +183,6 @@ Before stopping the coordinator, it also copies the three alert email settings f
 It backs up the database before migrating, and adds the nightly backup and the [morning report](#morning-report) to the coordinator's crontab if they aren't there. See [Backups](#backups).
 
 The script stops at the first step that fails, which leaves the coordinator stopped.
-
-`--reset-except-sheets` runs after the migrations. It empties `job_files`, `sheet_writes`, `jobs`, `drive_folders`, `admin_alerts` and `heartbeats` and restarts their ids from 1. It keeps `sheets` (including whether each tab is enabled) and `schema_migrations`. Before you use it:
-
-- Stop the workers first. A job that is running during the reset can't save its result, because its row no longer exists.
-- After the reset, the next sync queues every row with a blank status again.
-- Paused sheets stay paused, because `setup_failures` and `paused_until` are kept.
 
 To deploy by hand, on the coordinator VM:
 
@@ -419,7 +411,7 @@ The coordinator's log is the best single view of the system. It records each job
 
 **A `reboot_failed` alert.** The worker couldn't run `sudo -n /sbin/reboot`. It carries on archiving and doesn't try again until the supervisor restarts. Check `/etc/sudoers.d/aa-reboot` on the worker (`install-worker.sh` writes it), then restart the supervisor or reboot the VM by hand.
 
-**A row says `Queued` or `Archive in progress` but has no job.** Sync raises a `sheet_disagrees` alert, at most once a day per row. Usually the row was edited by hand, or the queue was reset. Clear the status to rerun the row.
+**A row says `Queued` or `Archive in progress` but has no job.** Sync raises a `sheet_disagrees` alert, at most once a day per row. Usually the row was edited by hand, or the database was restored from an older backup. Clear the status to rerun the row.
 
 ## Archive stats
 
@@ -464,9 +456,9 @@ $Q "SELECT s.client, count(DISTINCT j.id) AS archives, pg_size_pretty(sum(f.byte
 
 ## Backups
 
-`scripts/job_queue/backup-db.sh` dumps the queue database on the coordinator to `~/backups/auto_archiver_<weekday>.dump` (e.g. `auto_archiver_Mon.dump`), so there are always the last 7 days. It runs nightly at 02:30 UTC from cron, and before each deploy migrates. Each run appends a line to `~/backups/backup.log`. It reads `AA_DATABASE_URL` from the repo's `.env`.
+`scripts/job_queue/backup-db.sh` dumps the queue database on the coordinator to `~/backups/auto_archiver_<yyyymmdd_hhmm>.dump` in UTC (e.g. `auto_archiver_20261116_0230.dump`), and deletes backups older than 7 days. Each run gets its own file, so a deploy's backup never replaces the nightly one. It runs nightly at 02:30 UTC from cron, and before each deploy migrates. Each run appends a line to `~/backups/backup.log`. It reads `AA_DATABASE_URL` from the repo's `.env`.
 
-The backups are on the coordinator VM itself, so they cover mistakes, a bad migration or a reset, but not losing the VM.
+The backups are on the coordinator VM itself, so they cover mistakes or a bad migration, but not losing the VM.
 
 To back up by hand, on the coordinator: `bash scripts/job_queue/backup-db.sh`
 
@@ -474,7 +466,7 @@ To restore one over the current database, stop the coordinator and the workers' 
 
 ```bash
 sudo systemctl stop aa-coordinator
-pg_restore --clean --if-exists --no-owner -d "<AA_DATABASE_URL>" ~/backups/auto_archiver_<weekday>.dump
+pg_restore --clean --if-exists --no-owner -d "<AA_DATABASE_URL>" ~/backups/auto_archiver_<yyyymmdd_hhmm>.dump
 sudo systemctl start aa-coordinator
 ```
 

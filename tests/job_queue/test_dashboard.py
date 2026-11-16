@@ -8,7 +8,7 @@ import pytest
 
 from auto_archiver.job_queue import dashboard, db
 from auto_archiver.job_queue.dashboard import GREEN, RED, YELLOW
-from auto_archiver.job_queue.stage import set_stage
+from auto_archiver.job_queue.stage import set_result, set_stage, step_result
 
 
 @pytest.fixture(autouse=True)
@@ -461,3 +461,58 @@ def test_long_tab_names_are_cut_to_the_column(conn):
     header, row = [line for line in dashboard.sheets(conn) if "pool" in line or "older" in line]
     plain = re.compile(r"\x1b\[[0-9;]*m")
     assert plain.sub("", row).index(" hms ") == plain.sub("", header).index(" pool ")
+
+
+def results(conn, job_id) -> list[tuple]:
+    rows = conn.execute(
+        "SELECT step, result, detail FROM job_stages WHERE job_id = %s ORDER BY id", (job_id,)
+    ).fetchall()
+    return [(r["step"], r["result"], r["detail"]) for r in rows]
+
+
+def test_set_result_saves_what_the_current_step_achieved(conn, monkeypatch):
+    job = start_work(conn, add_sheet(conn), 2, monkeypatch)
+    set_stage("wacz_extractor_enricher")
+    set_result("blocked", "blocked by site - HTTP 403")
+    set_stage("hash_enricher")
+    assert results(conn, job["id"]) == [
+        ("wacz_extractor_enricher", "blocked", "blocked by site - HTTP 403"),
+        ("hash_enricher", None, None),
+    ]
+
+
+def test_set_result_leaves_a_job_that_is_no_longer_running(conn, monkeypatch):
+    job = start_work(conn, add_sheet(conn), 2, monkeypatch)
+    set_stage("html_formatter")
+    finish(conn, job, "done", "wacz: success")
+    set_result("success")
+    assert results(conn, job["id"]) == [("html_formatter", None, None)]
+
+
+def test_set_result_does_nothing_outside_a_queue_job(conn, monkeypatch):
+    monkeypatch.delenv("AA_JOB_ID", raising=False)
+    set_result("success")  # no step and no job, so nothing to save and no error
+
+
+@pytest.mark.parametrize(
+    "worked, notes, expected",
+    [
+        (True, [], ("success", "")),
+        (
+            True,
+            ["3 Instagram item(s) failed to download - see logs"],
+            ("partial", "3 Instagram item(s) failed to download - see logs"),
+        ),
+        (True, ["blocked by site - HTTP 403"], ("blocked", "blocked by site - HTTP 403")),
+        (True, ["screenshot blocked by site"], ("blocked", "screenshot blocked by site")),
+        (False, ["blocked by Cloudflare challenge"], ("blocked", "blocked by Cloudflare challenge")),
+        (False, [], ("failed", "found nothing to archive")),
+        (
+            True,
+            ["WACZ crawl hit memory cap", "site returned HTTP 404"],
+            ("partial", "WACZ crawl hit memory cap; site returned HTTP 404"),
+        ),
+    ],
+)
+def test_step_result(worked, notes, expected):
+    assert step_result(worked, notes, "found nothing to archive") == expected

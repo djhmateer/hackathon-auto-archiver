@@ -346,7 +346,7 @@ def test_finish_can_record_a_failure(conn):
     job_id = add_job(conn, add_sheet(conn))
     claimed = db.claim_job(conn, "vm1")
     assert db.finish_job(conn, job_id, claimed["lease_token"], "failed", {"status": "failed"}, error="killed") is True
-    assert job(conn, job_id)["status"] == "failed"
+    assert (job(conn, job_id)["status"], job(conn, job_id)["outcome"]) == ("failed", "failed")
     assert job(conn, job_id)["error"] == "killed"
 
 
@@ -426,7 +426,7 @@ def test_cleanup_fails_the_job_after_three_attempts(conn):
         assert db.requeue_expired(conn) == ((0, 1) if attempt == 3 else (1, 0))
 
     failed = job(conn, job_id)
-    assert failed["status"] == "failed"
+    assert (failed["status"], failed["outcome"]) == ("failed", "failed")
     assert failed["finished_at"] is not None
     entry = sheet_writes(conn, job_id)[-1]
     assert entry["cells"]["status"] == "Archive failed - lost its worker 3 times - please rerun"

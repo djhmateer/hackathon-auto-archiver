@@ -5,20 +5,16 @@
 # coordinator's crontab.
 # Also copies the alert email settings (POSTMARK_API_TOKEN, POSTMARK_FROM_EMAIL, ALERT_EMAIL_TO) from your .env.
 # Packages come from the committed poetry.lock: run poetry update locally, test and push, never on the VM.
-# --reset-except-sheets also empties every queue table except sheets (and schema_migrations), to start again.
 #
-#   bash scripts/job_queue/deploy-coordinator.sh [--reset-except-sheets]
+#   bash scripts/job_queue/deploy-coordinator.sh
 
 set -euo pipefail
 
 HOST=192.168.1.212
 PORT=340
 
-RESET=0
-if [ "${1:-}" = "--reset-except-sheets" ]; then
-    RESET=1
-elif [ $# -gt 0 ]; then
-    echo "Usage: $0 [--reset-except-sheets]"
+if [ $# -gt 0 ]; then
+    echo "Usage: $0"
     exit 1
 fi
 
@@ -67,7 +63,7 @@ chmod 600 .env.new
 mv .env.new .env
 echo "   its .env now has: $(grep -oE "^[A-Z_]+" .env | tr "\n" " ")"'
 
-ssh -p "$PORT" "$HOST" RESET=$RESET CONFIGS="'$CONFIGS'" bash -s <<'REMOTE'
+ssh -p "$PORT" "$HOST" CONFIGS="'$CONFIGS'" bash -s <<'REMOTE'
 set -euo pipefail
 export PATH="$HOME/.local/bin:$PATH"
 cd /home/dave/auto-archiver
@@ -83,7 +79,7 @@ echo "== Syncing packages"
 # sync, not install, so packages dropped from poetry.lock are removed too
 poetry sync --only main
 
-# before a migration or --reset-except-sheets changes anything. pg_dump takes a consistent snapshot, so the workers can run
+# before a migration changes anything. pg_dump takes a consistent snapshot, so the workers can run
 echo "== Backing up the database"
 bash scripts/job_queue/backup-db.sh
 
@@ -109,12 +105,6 @@ cron_line "0 5 * * * cd $PWD && $HOME/.local/bin/poetry run python -m auto_archi
 
 echo "== Migrating"
 poetry run python -m auto_archiver.job_queue.migrate
-
-if [ "$RESET" = "1" ]; then
-    echo "== Emptying every table except sheets"
-    PGPASSWORD=password psql -h localhost -U bob -d auto_archiver -v ON_ERROR_STOP=1 -c \
-        "TRUNCATE job_files, sheet_writes, jobs, drive_folders, admin_alerts, heartbeats RESTART IDENTITY"
-fi
 
 echo "== Starting aa-coordinator"
 sudo systemctl start aa-coordinator

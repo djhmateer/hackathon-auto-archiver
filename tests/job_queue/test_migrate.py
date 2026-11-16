@@ -51,6 +51,46 @@ def test_the_real_migrations_build_the_schema(empty):
     assert {"sheets", "jobs", "sheet_writes", "admin_alerts", "heartbeats"} <= tables(empty)
 
 
+def test_014_fills_in_the_outcome_of_finished_jobs_from_their_status_text(empty, tmp_path):
+    for path in sorted(migrate.MIGRATIONS_DIR.glob("*.sql")):
+        if path.name < "014":
+            (tmp_path / path.name).write_bytes(path.read_bytes())
+    migrate.migrate(empty, tmp_path)
+    sheet = empty.execute(
+        "INSERT INTO sheets (spreadsheet_id, worksheet_gid, worksheet, config) VALUES ('s1', 1, 't1', 'c') RETURNING id"
+    ).fetchone()["id"]
+    cases = [
+        ("done", "vimeo: success", "success"),
+        ("done", "[cached] vimeo: success", "success"),
+        ("done", "yt-dlp_Twitter: success (17 uploads failed - see logs)", "partial"),
+        ("done", "wayback: success (blocked by site - HTTP 403)", "partial"),
+        ("done", "no archiver (blocked by site - please requeue) (screenshot blocked by site)", "blocked"),
+        ("done", "no archiver (aa IP blocked)", "blocked"),
+        ("done", "no archiver (screenshot blocked by site)", "nothing_archived"),
+        ("done", "wacz: success (site returned HTTP 404)", "nothing_archived"),
+        ("done", "nothing archived", "nothing_archived"),
+        ("failed", "Archive failed - a reason", "failed"),
+        ("rejected", "Rejected - a reason", None),
+    ]
+    ids = []
+    for row, (status, text, _) in enumerate(cases, start=2):
+        job_id = empty.execute(
+            "INSERT INTO jobs (sheet_id, row_number, url, domain, status) VALUES (%s, %s, 'u', 'd', %s) RETURNING id",
+            (sheet, row, status),
+        ).fetchone()["id"]
+        # an older write first, so only the last one counts
+        for cell in ("Archive in progress", text):
+            empty.execute(
+                "INSERT INTO sheet_writes (job_id, cells) VALUES (%s, jsonb_build_object('status', %s::text))",
+                (job_id, cell),
+            )
+        ids.append(job_id)
+
+    assert "014_job_outcome.sql" in migrate.migrate(empty)
+    outcomes = [empty.execute("SELECT outcome FROM jobs WHERE id = %s", (i,)).fetchone()["outcome"] for i in ids]
+    assert outcomes == [outcome for _, _, outcome in cases]
+
+
 def test_check_on_a_new_database_says_everything_is_pending(empty, tmp_path):
     (tmp_path / "001_first.sql").write_text("CREATE TABLE a (id int);")
     assert migrate.check(empty, tmp_path) == (["001_first.sql"], [])

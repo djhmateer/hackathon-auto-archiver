@@ -47,7 +47,7 @@ from .module import ModuleFactory, LazyBaseModule
 from . import validators, Feeder, Extractor, Database, Storage, Formatter, Enricher
 from .consts import MODULE_TYPES, SetupError
 from auto_archiver.utils.url import check_url_or_raise, clean, domain_for_url
-from auto_archiver.job_queue.stage import set_stage
+from auto_archiver.job_queue.stage import set_result, set_stage, step_result
 
 if TYPE_CHECKING:
     from .base_module import BaseModule
@@ -941,16 +941,27 @@ Here's how that would look: \n\nsteps:\n  extractors:\n  - [your_extractor_name_
         for a in extractors:
             logger.info(f"Trying extractor {a.name}")
             set_stage(a.name)
+            notes_before = list(result.get_status_notes())
             try:
-                result.merge(a.download(result))
-                if result.is_success():
-                    break
+                found = a.download(result)
+                result.merge(found)
             except Exception as e:
                 # DM 10th Nov 26 - a 404 is content that's gone (the next extractor still tries), not a fault
                 if isinstance(e, requests.HTTPError) and e.response is not None and e.response.status_code == 404:
                     logger.warning(f"Extractor {a.name}: {e}")
+                    set_result("failed", "page not found (HTTP 404)")
                 else:
                     logger.error(f"Extractor {a.name}: {e}: {traceback.format_exc()}")
+                    set_result("failed", f"error: {type(e).__name__}")
+                continue
+            # DM 16th Nov 26 - for the client's view of the job: most extractors turn down other sites' URLs
+            if not found and a.valid_url and not a.valid_url.search(url):
+                set_result("skipped", "not for this site")
+            else:
+                new_notes = [n for n in result.get_status_notes() if n not in notes_before]
+                set_result(*step_result(result.is_success(), new_notes, "found nothing to archive"))
+            if result.is_success():
+                break
 
         if not result.is_success():
             logger.warning(f"No successful capture for {url}, status={result.status!r}, notes={result.get_status_notes()}")
@@ -958,17 +969,28 @@ Here's how that would look: \n\nsteps:\n  extractors:\n  - [your_extractor_name_
         # 4 - call enrichers to work with archived content
         for e in enrichers:
             set_stage(e.name)
+            notes_before = list(result.get_status_notes())
             try:
                 e.enrich(result)
             except Exception as exc:
                 logger.error(f"Enricher {e.name}: {exc}: {traceback.format_exc()}")
+                set_result("failed", f"error: {type(exc).__name__}")
+                continue
+            new_notes = [n for n in result.get_status_notes() if n not in notes_before]
+            set_result(*step_result(True, new_notes))
 
         # DM 7th Nov 25 - disconnect vpn if connected
         if needs_vpn:
             self.disconnect_vpn()
 
         # 5 - store all downloaded/generated media
+        failures_before = len(result.get_store_failures())
         result.store(storages=self.storages)
+        # only with media, as otherwise no storing step started, and this would overwrite the last enricher's result
+        if failed := len(result.get_store_failures()) - failures_before:
+            set_result("partial", f"{failed} upload{'s' if failed > 1 else ''} failed")
+        elif result.media:
+            set_result("success")
 
         # 6 - format and store formatted if needed
         final_media: Media
@@ -976,6 +998,7 @@ Here's how that would look: \n\nsteps:\n  extractors:\n  - [your_extractor_name_
         if final_media := self.formatters[0].format(result):
             final_media.store(url=url, metadata=result, storages=self.storages)
             result.set_final_media(final_media)
+            set_result("success")
 
         if result.is_empty():
             result.status = "nothing archived"
