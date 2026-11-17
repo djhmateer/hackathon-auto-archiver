@@ -87,6 +87,8 @@ class WaybackExtractorEnricher(Enricher, Extractor):
                 error_content = r.json()
             except requests.exceptions.JSONDecodeError:
                 error_content = r.text
+            # DM 17th Nov 26 - a 500 returns a whole HTML page (140 KB in a console log), keep the start only
+            error_content = str(error_content)[:200]
             logger.error(em := f"Internet archive failed with status of {r.status_code}: {error_content}")
             to_enrich.set("wayback", em)
             return False

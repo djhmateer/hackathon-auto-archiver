@@ -59,14 +59,10 @@ class InstagramAPIExtractor(Extractor):
             self.full_profile_max_posts = math.inf
 
     def sanitize_url(self, url: str) -> str:
-        # DM 28th Sep 26 - we don't support instagram /reels/ links, ask the user to use /p/ instead
-        # raised here as sanitize_url runs before the extractors outside their try/except, so the
-        # AssertionError reaches the orchestrator which writes the message to the spreadsheet status column
-        if reels_match := re.search(r"instagram\.com/reels/([^/?#]+)", url):
-            raise AssertionError(
-                f"- Instagram /reels/ links are not supported, please use /p/ instead eg https://www.instagram.com/p/{reels_match.group(1)}/"
-            )
-        return url
+        # DM 17th Nov 26 - /reels/<code>/ was misparsed by valid_url as the profile 'reels', so it used to be rejected.
+        # The code is the same shortcode as /reel/<code>/, so rewrite it. /reels/audio/<id> is an audio page, not a post
+        #   eg https://www.instagram.com/reels/C9QmUGDNOd0/ -> https://www.instagram.com/reel/C9QmUGDNOd0/
+        return re.sub(r"instagram\.com/reels/(?!audio/)", "instagram.com/reel/", url, count=1)
 
     def download(self, item: Metadata) -> Metadata:
         # DM 8th Oct 26 - posts/carousel items that fail are skipped so the rest is archived, but the row still

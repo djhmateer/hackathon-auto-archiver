@@ -169,7 +169,7 @@ def test_enrich_stops_after_first_ffmpeg_error(
 
     mock_output = mock_ffmpeg_environment["mock_output"]
     mock_output.run.side_effect = ffmpeg.Error("ffmpeg", b"", b"Cannot determine format of input stream 0:0 after EOF")
-    mock_log = mocker.patch("auto_archiver.utils.custom_logger.logger.error")
+    mock_log = mocker.patch("auto_archiver.utils.custom_logger.logger.warning")
 
     thumbnail_enricher.enrich(metadata_with_video)
 

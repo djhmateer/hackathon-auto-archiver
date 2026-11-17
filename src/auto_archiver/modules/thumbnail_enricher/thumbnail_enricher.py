@@ -76,7 +76,8 @@ class ThumbnailEnricher(Enricher):
                         stderr = e.stderr.decode(errors="replace") if e.stderr else e
                         # DM 24th Sep 26 - a broken/truncated file fails the same way for every timestamp,
                         # so stop here rather than logging the same error up to max_thumbnails times
-                        logger.error(
+                        # DM 17th Nov 26 - warning not error: the job still succeeds, it's a bad/odd video file
+                        logger.warning(
                             f"ffmpeg error creating thumbnail {index} for {m.filename}, skipping remaining thumbnails: {stderr}"
                         )
                         break

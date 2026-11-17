@@ -107,15 +107,25 @@ class TestInstagramAPIExtractor(TestExtractorBase):
         assert self.extractor.valid_url.findall(url) == expected
 
     @pytest.mark.parametrize(
-        "url",
-        ["https://www.instagram.com/reels/C9QmUGDNOd0/", "https://instagram.com/reels/C9QmUGDNOd0?igsh=abc"],
+        "url, expected",
+        [
+            ("https://www.instagram.com/reels/C9QmUGDNOd0/", "https://www.instagram.com/reel/C9QmUGDNOd0/"),
+            ("https://instagram.com/reels/C9QmUGDNOd0?igsh=abc", "https://instagram.com/reel/C9QmUGDNOd0?igsh=abc"),
+        ],
     )
-    def test_sanitize_url_rejects_reels(self, url):
-        with pytest.raises(AssertionError, match=r"use /p/ instead eg https://www.instagram.com/p/C9QmUGDNOd0/"):
-            self.extractor.sanitize_url(url)
+    def test_sanitize_url_rewrites_reels_to_reel(self, url, expected):
+        assert self.extractor.sanitize_url(url) == expected
+        assert self.extractor.valid_url.findall(expected) == [("reel", "C9QmUGDNOd0", "")]
 
-    def test_sanitize_url_leaves_other_urls(self):
-        url = "https://www.instagram.com/reel/C9QmUGDNOd0/"
+    @pytest.mark.parametrize(
+        "url",
+        [
+            "https://www.instagram.com/reel/C9QmUGDNOd0/",
+            "https://www.instagram.com/reels/audio/123456789/",
+            "https://www.instagram.com/someuser/reels/",
+        ],
+    )
+    def test_sanitize_url_leaves_other_urls(self, url):
         assert self.extractor.sanitize_url(url) == url
 
     def test_share_link_with_story_media_id_downloads_story_item(self, mocker):
