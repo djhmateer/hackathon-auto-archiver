@@ -47,7 +47,7 @@ from .module import ModuleFactory, LazyBaseModule
 from . import validators, Feeder, Extractor, Database, Storage, Formatter, Enricher
 from .consts import MODULE_TYPES, SetupError
 from auto_archiver.utils.url import check_url_or_raise, clean, domain_for_url
-from auto_archiver.job_queue.stage import set_result, set_stage, step_result
+from auto_archiver.job_queue.stage import row_kill_seconds, set_result, set_stage, step_result
 
 if TYPE_CHECKING:
     from .base_module import BaseModule
@@ -65,8 +65,8 @@ JOB_FORMAT = (
 SLOW_ROW_SECONDS = 15 * 60
 HANG_DUMP_SECONDS = 30 * 60
 # DM 25th Oct 26 - each new kind of hang was found only after it had blocked a server for hours (a live radio
-# stream: 10h), so a row still going after this is killed, whatever is stuck. Longest genuine row seen: 134 min
-ROW_KILL_SECONDS = 3 * 60 * 60
+# stream: 10h), so a row still going after row_kill_seconds (3h, 12h for a Drive folder) is killed, whatever is
+# stuck. Longest genuine row seen: 134 min
 # how long the kill waits for the log line and the sheet's status, either of which could be what's stuck
 KILL_REPORT_SECONDS = 60
 
@@ -666,7 +666,7 @@ Here's how that would look: \n\nsteps:\n  extractors:\n  - [your_extractor_name_
                     if self.hang_log:
                         watchdogs = [
                             threading.Timer(HANG_DUMP_SECONDS, self._dump_thread_stacks, args=(item.get_url(),)),
-                            threading.Timer(ROW_KILL_SECONDS, self._kill_hung_row, args=(item,)),
+                            threading.Timer(row_kill_seconds(item.get_url()), self._kill_hung_row, args=(item,)),
                         ]
                         for watchdog in watchdogs:
                             watchdog.daemon = True
@@ -698,7 +698,7 @@ Here's how that would look: \n\nsteps:\n  extractors:\n  - [your_extractor_name_
 
     def _kill_hung_row(self, item: Metadata) -> None:
         """
-        Runs on a watchdog thread when a row is still going after ROW_KILL_SECONDS. Kills our child processes
+        Runs on a watchdog thread when a row is still going after row_kill_seconds. Kills our child processes
         (ffmpeg, geckodriver, Firefox, docker run) and exits; the cron script carries on, and the next run skips
         this row as it has a status
         """
@@ -722,7 +722,7 @@ Here's how that would look: \n\nsteps:\n  extractors:\n  - [your_extractor_name_
             os._exit(1)
 
     def _report_killed_row(self, item: Metadata) -> None:
-        hours = ROW_KILL_SECONDS / 3600
+        hours = row_kill_seconds(item.get_url()) / 3600
         logger.error(f"Row still running after {hours:g} hours, killing the run: {item.get_url()}")
         for d in self.databases:
             try:

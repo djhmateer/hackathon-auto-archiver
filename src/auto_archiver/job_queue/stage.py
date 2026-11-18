@@ -4,6 +4,7 @@ and what it achieved.
 """
 
 import os
+import re
 
 import psycopg
 from psycopg.rows import dict_row
@@ -12,6 +13,23 @@ from auto_archiver.job_queue import db
 from auto_archiver.utils.custom_logger import logger
 
 _step = None  # this process's current step. Each archiver process runs one attempt of one job
+
+# the archiver kills a row after row_kill_seconds, as it can report the failure. The supervisor's limit is the backstop
+ROW_KILL_SECONDS = 3 * 60 * 60
+# DM 18th Nov 26 - a Drive folder of 480 files (1.1 GB) took 26 min; bigger ones taking hours is fine
+DRIVE_FOLDER_KILL_SECONDS = 12 * 60 * 60
+DRIVE_FOLDER_URL = re.compile(r"https?://drive\.google\.com/drive/(?:u/\d+/)?folders/")
+BACKSTOP_SECONDS = 5 * 60
+
+
+def row_kill_seconds(url: str) -> int:
+    """How long the archiver lets a row run before killing it"""
+    return DRIVE_FOLDER_KILL_SECONDS if DRIVE_FOLDER_URL.match(url) else ROW_KILL_SECONDS
+
+
+def time_limit_seconds(url: str) -> int:
+    """The supervisor's backstop: after the archiver's own kill, which goes first as it can report the failure"""
+    return row_kill_seconds(url) + BACKSTOP_SECONDS
 
 
 def set_stage(step: str, progress: str = "") -> None:

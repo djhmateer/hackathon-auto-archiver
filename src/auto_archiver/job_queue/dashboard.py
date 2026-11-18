@@ -12,7 +12,8 @@ from pathlib import Path
 
 from auto_archiver.job_queue import db
 from auto_archiver.job_queue.coordinator import SYNC_SECONDS, WORKER_QUIET_SECONDS
-from auto_archiver.job_queue.worker_supervisor import TIME_LIMIT_SECONDS, git_commit, machine_stats
+from auto_archiver.job_queue.stage import time_limit_seconds
+from auto_archiver.job_queue.worker_supervisor import git_commit, machine_stats
 
 REFRESH_SECONDS = 2
 BACKUP_DIR = Path.home() / "backups"
@@ -190,7 +191,7 @@ def workers(conn, coordinator_commit: str) -> list[str]:
             else:
                 # this attempt, not started_at: that's the first claim, so it would add the time of a released attempt
                 seconds = (datetime.now(timezone.utc) - job["work_started_at"]).total_seconds()
-                took = colour(RED if seconds > TIME_LIMIT_SECONDS else GREEN, ago(seconds))
+                took = colour(RED if seconds > time_limit_seconds(job["url"]) else GREEN, ago(seconds))
             lines.append(
                 f"{INDENT}job {job['id']} {tab(job)} "
                 f"row {job['row_number']} {job['domain']}, {took}, attempt {job['attempts']}"

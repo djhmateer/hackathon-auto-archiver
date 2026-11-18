@@ -409,7 +409,7 @@ def test_time_limit_kills_and_is_a_final_failure_with_no_retry(conn, make_superv
     sup.tick(conn)
     db.mark_work_started(conn, job_id, sup.running.job["lease_token"])
 
-    clock.now += worker_supervisor.TIME_LIMIT_SECONDS - 1
+    clock.now += worker_supervisor.time_limit_seconds("https://example.com/post/2") - 1
     sup.check_time_limits()
     assert children[0].killed is False
 
@@ -424,12 +424,29 @@ def test_time_limit_kills_and_is_a_final_failure_with_no_retry(conn, make_superv
     assert db.requeue_expired(conn) == (0, 0)
 
 
+def test_drive_folder_gets_the_long_time_limit(conn, make_supervisor, clock, children):
+    url = "https://drive.google.com/drive/folders/folder_id_1"
+    job_id = db.add_job(conn, add_sheet(conn), 2, url, "drive.google.com")
+    conn.execute("UPDATE jobs SET available_at = now() - interval '1 minute' WHERE id = %s", (job_id,))
+    sup = make_supervisor()
+    sup.tick(conn)
+    assert worker_supervisor.time_limit_seconds(url) == 12 * 60 * 60 + 5 * 60
+
+    clock.now += worker_supervisor.time_limit_seconds("https://example.com/post/2") + 1
+    sup.check_time_limits()
+    assert children[0].killed is False
+
+    clock.now += 9 * 60 * 60
+    sup.check_time_limits()
+    assert children[0].killed is True
+
+
 def test_time_limit_works_while_postgres_is_down_and_saves_when_it_returns(conn, make_supervisor, clock, children):
     job_id = add_job(conn, add_sheet(conn))
     sup = make_supervisor()
     sup.tick(conn)
     db.mark_work_started(conn, job_id, sup.running.job["lease_token"])
-    clock.now += worker_supervisor.TIME_LIMIT_SECONDS + 1
+    clock.now += worker_supervisor.time_limit_seconds("https://example.com/post/2") + 1
     sup.check_time_limits()  # no connection needed
     assert children[0].killed is True
     assert job(conn, job_id)["status"] == "running"
@@ -441,7 +458,7 @@ def test_time_limit_applies_to_a_child_killed_during_setup_too(conn, make_superv
     job_id = add_job(conn, add_sheet(conn))
     sup = make_supervisor()
     sup.tick(conn)
-    clock.now += worker_supervisor.TIME_LIMIT_SECONDS + 1
+    clock.now += worker_supervisor.time_limit_seconds("https://example.com/post/2") + 1
     sup.check_time_limits()
     sup.tick(conn)
     assert job(conn, job_id)["status"] == "failed", "hanging for 3 hours isn't a setup failure to retry"
@@ -629,13 +646,27 @@ def test_reboot_waits_for_running_jobs_and_claims_nothing_new(conn, make_supervi
     assert len(children) == 1
 
 
-def test_reboot_is_forced_an_hour_later(conn, make_supervisor, mocker):
+def test_reboot_waits_for_a_drive_folder_job_within_its_time_limit(conn, make_supervisor, clock, mocker):
+    url = "https://drive.google.com/drive/folders/folder_id_1"
+    job_id = db.add_job(conn, add_sheet(conn), 2, url, "drive.google.com")
+    conn.execute("UPDATE jobs SET available_at = now() - interval '1 minute' WHERE id = %s", (job_id,))
+    plain = make_supervisor()
+    plain.tick(conn)
+    clock.now += 5 * 60 * 60
+    sup, reboot = rebooting_supervisor(make_supervisor, mocker, now=UK_MORNING + timedelta(hours=5))
+    sup.running = plain.running
+    sup.tick(conn)
+    reboot.assert_not_called()
+
+
+def test_reboot_is_forced_once_the_job_is_past_its_time_limit(conn, make_supervisor, clock, mocker):
     add_job(conn, add_sheet(conn), 2)
     plain = make_supervisor()
     plain.tick(conn)
-    later = UK_MORNING + timedelta(minutes=55)
-    sup, reboot = rebooting_supervisor(make_supervisor, mocker, now=later)
+    clock.now += worker_supervisor.time_limit_seconds("https://example.com/post/2") + 1
+    sup, reboot = rebooting_supervisor(make_supervisor, mocker)
     sup.running = plain.running
+    sup.running.kill_reason = "killed, but the child hasn't gone"
     sup.tick(conn)
     reboot.assert_called_once()
 

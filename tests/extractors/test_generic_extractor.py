@@ -459,6 +459,20 @@ class TestGenericExtractorYtdlpOptions:
         assert extractor.download_subtitles_separately("https://example.com/video", mocker.Mock(), "article") == playlist
         assert self._options(youtube_dl)["extract_flat"] is False
 
+    def test_subtitle_download_has_the_same_playlist_limit_as_the_main_download(
+        self, extractor, youtube_dl, mocker, make_item
+    ):
+        extractor.max_downloads = 5
+
+        extractor.download(make_item("https://example.com/video"))
+        main = self._options(youtube_dl)
+        extractor.download_subtitles_separately("https://example.com/video", mocker.Mock(), "account")
+        subtitles = self._options(youtube_dl)
+
+        assert subtitles["playlistend"] == main["playlistend"] == 5
+        # max_downloads would raise MaxDownloadsReached and lose the subtitle data
+        assert subtitles["max_downloads"] is None
+
     def test_subtitle_download_returns_none_without_subtitles(self, extractor, youtube_dl, mocker):
         youtube_dl.return_value.extract_info.return_value = {"id": "article", "entries": [{"id": "vid"}]}
 

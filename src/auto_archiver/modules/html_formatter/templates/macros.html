@@ -147,9 +147,21 @@ No preview available for <code>{{ m.key }}</code>.
         <ul>
             <li><b>key:</b> <span class="copy">{{ prop.key }}</span></li>
             <li><b>type:</b> <span class="copy">{{ prop.mimetype }}</span></li>
+            {# size is always shown, eg 11.5 MB, so it's never collapsed below #}
+            {% if prop.properties.get('size') %}
+            <li><b>size:</b> {{ prop.properties['size'] }}</li>
+            {% endif %}
             {# graphic_* go last, below; a rating of 1-5 is too short for the length check below #}
-            {% for subprop in prop.properties if not subprop.startswith('graphic_') %}
+            {# show key, type and the first 3 properties; the rest are collapsed into a <details>, unless that would
+               hide only one, which may as well be shown. It's in an <li> with its own <ul>, as a <ul> holds only <li>s #}
+            {% for subprop in prop.properties if not subprop.startswith('graphic_') and subprop != 'size'
+                and (prop.properties[subprop] | is_list or prop.properties[subprop] | string | length > 1) %}
 
+                {% if loop.index == 4 and loop.length > 4 %}
+                <li style="list-style: none"><details>
+                    <summary>{{ loop.length - 3 }} more</summary>
+                    <ul style="padding-left: 0">
+                {% endif %}
 
                 {% if prop.properties[subprop] | is_list %}
                 <p></p>
@@ -163,10 +175,14 @@ No preview available for <code>{{ m.key }}</code>.
                     </div>
                 </div>
                 <p></p>
-                {% elif prop.properties[subprop] | string | length > 1 %}
+                {% else %}
                 <li><b>{{ subprop }}:</b> {{ copy_urlize(prop.properties[subprop]) }}</li>
                 {% endif %}
 
+                {% if loop.last and loop.length > 4 %}
+                    </ul>
+                </details></li>
+                {% endif %}
             {% endfor %}
 
             {% set graphic = prop.properties.get('graphic_rating') %}

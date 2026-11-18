@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-Auto Archiver is a Python tool for automatically archiving web content (social media posts, videos, images, webpages) in a secure and verifiable way. This is a fork of the original Bellingcat Auto Archiver with additional features including Uwazi integration, Facebook crawling, and various customizations.
+Auto Archiver is a Python tool for automatically archiving web content (social media posts, videos, images, webpages) in a secure and verifiable way. This is a fork of the original Bellingcat Auto Archiver with additional features including Facebook crawling, and various customizations.
 
 ## Architecture
 
@@ -26,7 +26,6 @@ Configuration is done via YAML files typically stored in `secrets/` directory.
   - `core/orchestrator.py` - Main orchestration logic
   - `modules/` - All feeder, extractor, enricher, database, storage, and formatter modules
   - `utils/` - Utility functions
-  - `uwazi_api/` - Uwazi integration
 - `secrets/` - Configuration files and credentials (not in git)
   - `orchestration*.yaml` - Configuration files for different archiving workflows
   - `service_account*.json` - Google service account credentials
@@ -113,7 +112,6 @@ Nov 2026). Use them only for comparisons with how the cron servers behaved.
 
 ## Important Customizations in This Fork
 
-- Uwazi integration for content management
 - Enhanced Facebook crawling capabilities
 - Spreadsheet cell overwriting allowed
 - Hardcoded log file locations (`logs/1debug.log`, etc.)

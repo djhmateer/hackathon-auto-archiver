@@ -400,8 +400,7 @@ def test_real_child_killed_mid_job_has_its_processes_and_files_cleared(conn, run
         '        path = os.path.join(self.tmp_dir, "file.txt")',
     )
     (tmp_path / "test_modules" / "fake_extractor" / "fake_extractor.py").write_text(code)
-    limit = mocker.patch("auto_archiver.job_queue.worker_supervisor.TIME_LIMIT_SECONDS", 25)
-    assert limit == 25
+    mocker.patch("auto_archiver.job_queue.worker_supervisor.time_limit_seconds", return_value=25)
 
     real_tick = WorkerSupervisor.tick
 

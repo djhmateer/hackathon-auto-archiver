@@ -23,16 +23,14 @@ from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
 
 from auto_archiver.job_queue import db
+from auto_archiver.job_queue.stage import time_limit_seconds
 from auto_archiver.utils.custom_logger import logger
 
 TICK_SECONDS = 2
 RENEW_SECONDS = 60
-# the child's ROW_KILL_SECONDS (3 h) goes first, as it can report the failure. This is the backstop
-TIME_LIMIT_SECONDS = 3 * 60 * 60 + 5 * 60
 QUICK_FAILURE_SECONDS = 60
 QUICK_FAILURES_TO_PAUSE = 3
 PAUSE_SECONDS = 15 * 60
-FORCE_REBOOT_AFTER_SECONDS = 60 * 60
 REBOOT_TIMEZONE = ZoneInfo("Europe/London")
 ARCHIVER_PATH = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 # the archiver's console output, at ERROR: setup errors, which happen before its logs are set up, and crashes.
@@ -281,9 +279,12 @@ class WorkerSupervisor:
         cleanup requeues it first, after a long outage, it gets one more attempt instead of failing. That's acceptable
         """
         running = self.running
-        if running is not None and running.kill_reason is None and self.clock() - running.started > TIME_LIMIT_SECONDS:
+        if running is None or running.kill_reason is not None:
+            return
+        limit = time_limit_seconds(running.job["url"])
+        if self.clock() - running.started > limit:
             logger.error(f"Job {running.job['id']} hit the time limit, killing it")
-            running.kill_reason = f"- still running after {TIME_LIMIT_SECONDS // 60} minutes, killed"
+            running.kill_reason = f"- still running after {limit // 60} minutes, killed"
             self._kill_child()
 
     def _record_quick_failure(self, sheet_id: int, conn) -> None:
@@ -368,14 +369,20 @@ class WorkerSupervisor:
                 self._kill_child()
 
     def _reboot_due(self) -> tuple[bool, bool]:
-        """(due, forced), as the cron scripts did: the first idle moment after reboot_at, at most once a day"""
+        """
+        (due, forced), as the cron scripts did: the first idle moment after reboot_at, at most once a day. A running
+        job delays it for as long as its time limit (3 h, 12 h for a Drive folder), so the reboot never cuts it short;
+        it's only forced if the job is still going after that, ie the time limit's kill didn't work
+        """
         if not self.reboot_at or self.reboot_failed:
             return False, False
         now = self.wall_clock()
         hour, minute = map(int, self.reboot_at.split(":"))
         target = now.astimezone(REBOOT_TIMEZONE).replace(hour=hour, minute=minute, second=0, microsecond=0)
         due = now >= target and self.get_boot_time() < target
-        return due, due and (now - target).total_seconds() >= FORCE_REBOOT_AFTER_SECONDS
+        running = self.running
+        over_limit = running is not None and self.clock() - running.started > time_limit_seconds(running.job["url"])
+        return due, due and over_limit
 
     def _reboot_if_due(self, conn) -> bool:
         """True if a reboot is due, so nothing new should be claimed"""

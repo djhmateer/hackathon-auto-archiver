@@ -367,7 +367,7 @@ def test_other_sites_never_checked(mocker, url, vk_blocked):
 def test_row_still_running_after_kill_limit_is_marked_failed_and_killed(mocker, tmp_path):
     from auto_archiver.core import orchestrator as orch
 
-    mocker.patch.object(orch, "ROW_KILL_SECONDS", 0.3)
+    mocker.patch("auto_archiver.job_queue.stage.ROW_KILL_SECONDS", 0.3)
     mocker.patch.object(orch, "_descendant_pids", return_value=[111, 222])
     kill = mocker.patch("os.kill")
     exit_ = mocker.patch("os._exit")

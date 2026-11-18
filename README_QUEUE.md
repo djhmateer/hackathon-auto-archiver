@@ -154,7 +154,7 @@ The script enables the `aa-worker-supervisor` service but doesn't start it. Then
 Notes:
 
 - A worker runs one job at a time. To add capacity, add VMs.
-- Workers reboot daily at 05:20 UK time. If a job is still running at that point, the reboot waits for it, for up to an hour. To change the time, edit `/etc/systemd/system/aa-worker-supervisor.service` and run `sudo systemctl daemon-reload`.
+- Workers reboot daily at 05:20 UK time. If a job is still running at that point, the reboot waits for it, for as long as its time limit (3 h, 12 h for a Google Drive folder). To change the time, edit `/etc/systemd/system/aa-worker-supervisor.service` and run `sudo systemctl daemon-reload`.
 - A VM should run either the old cron archiver or a worker supervisor, never both.
 
 ## Deploying updates
@@ -496,5 +496,5 @@ Never edit a file that has already been applied: its checksum is recorded. The c
 | Requeue after a lease expires | 2 min grace, then claimable 2 min later | `db.py` `requeue_expired` |
 | Attempts before a job fails | 3 | `db.py` `MAX_ATTEMPTS` |
 | Setup failures before a sheet is paused | 3, then paused for 15 min | `db.py` `MAX_SETUP_FAILURES` |
-| Job time limit | 3 h in the archiver, with a 3 h 5 min backstop in the supervisor | `worker_supervisor.py` `TIME_LIMIT_SECONDS` |
-| Daily reboot | 05:20 UK time, forced after 1 h if a job is still running | service file `--reboot-at`, `FORCE_REBOOT_AFTER_SECONDS` |
+| Job time limit | 3 h in the archiver (12 h for a Google Drive folder), with a 5 min later backstop in the supervisor | `stage.py` `ROW_KILL_SECONDS`, `DRIVE_FOLDER_KILL_SECONDS` |
+| Daily reboot | 05:20 UK time; a running job delays it up to its time limit, then it's forced | service file `--reboot-at`, `worker_supervisor.py` `_reboot_due` |

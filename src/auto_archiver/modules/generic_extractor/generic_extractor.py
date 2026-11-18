@@ -496,6 +496,12 @@ class GenericExtractor(Extractor):
             if self.proxy:
                 subtitle_ydl_options.extend(["--proxy", self.proxy])
 
+            # DM 18th Nov 26 - same limit as the main download, or a SoundCloud account player on a news article
+            # walked all 1389 of the account's tracks looking for subtitles (5+ min, and 1600 HTTP 403s).
+            # Only --playlist-end: --max-downloads raises MaxDownloadsReached, which loses the subtitle data
+            if self.max_downloads != "inf":
+                subtitle_ydl_options.extend(["--playlist-end", str(self.max_downloads)])
+
             # Add auth if needed
             auth = self.auth_for_site(url, extract_cookies=False)
             if auth:
