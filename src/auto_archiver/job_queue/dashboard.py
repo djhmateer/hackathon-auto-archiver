@@ -5,7 +5,8 @@ A console dashboard for the queue, run on the coordinator. Read only: it never w
 
 Redraws every few seconds until Ctrl+C. Green is fine, yellow is worth a look, red needs action. p shows one pool
 at a time, then all again: every section only has that pool's sheets, jobs and workers, so a screenshot can go to a
-client without the other clients' data.
+client without the other clients' data. The shared pool's workers are shown too, as they can work for any pool, but
+one running another pool's job only says it's busy.
 """
 
 import select
@@ -179,19 +180,23 @@ def header(conn, coordinator_stats: dict, pool: str = None) -> list[str]:
 
 
 def workers(conn, coordinator_commit: str, pool: str = None) -> list[str]:
+    """pool: only that pool's workers and the shared pool's, and only that pool's jobs and counts"""
     lines = [colour(BOLD, "Workers")]
     running = {job["worker"]: job for job in db.get_running_jobs(conn)}
+    # a shared worker's counts in a pool's view are only that pool's jobs
     today = {
         row["worker"]: row
         for row in conn.execute(
-            """
-            SELECT worker, count(*) FILTER (WHERE status = 'done') AS done,
-                count(*) FILTER (WHERE status = 'failed') AS failed
-            FROM jobs WHERE finished_at >= date_trunc('day', now()) GROUP BY worker
-            """
+            f"""
+            SELECT j.worker, count(*) FILTER (WHERE j.status = 'done') AS done,
+                count(*) FILTER (WHERE j.status = 'failed') AS failed
+            FROM jobs j JOIN sheets s ON s.id = j.sheet_id
+            WHERE j.finished_at >= date_trunc('day', now()) AND {IN_POOL} GROUP BY j.worker
+            """,
+            {"pool": pool},
         )
     }
-    beats = [beat for beat in db.get_worker_heartbeats(conn) if pool is None or beat["pool"] == pool]
+    beats = [beat for beat in db.get_worker_heartbeats(conn) if pool is None or beat["pool"] == pool or beat["shared"]]
     if not beats:
         lines.append(colour(RED, "  No worker has ever sent a heartbeat"))
     for beat in beats:
@@ -203,17 +208,19 @@ def workers(conn, coordinator_commit: str, pool: str = None) -> list[str]:
         else:
             # a worker that missed a deploy runs different code from the coordinator
             code = colour(GREEN if beat["git_commit"] == coordinator_commit else RED, beat["git_commit"])
-        pool = colour(GREEN, beat["pool"]) if beat["pool"] else colour(RED, "none, so it claims nothing")
+        its_pool = colour(GREEN, beat["pool"]) if beat["pool"] else colour(RED, "none, so it claims nothing")
         if beat["shared"]:
-            pool += colour(DIM, " (shared, helps any full pool)")
+            its_pool += colour(DIM, " (shared, helps any full pool)")
         lines.append(
-            f"  {name:<{WORKER_WIDTH}} heartbeat {heartbeat(beat['seconds_ago'])}, pool {pool}, code {code}, "
+            f"  {name:<{WORKER_WIDTH}} heartbeat {heartbeat(beat['seconds_ago'])}, pool {its_pool}, code {code}, "
             f"today {colour(GREEN, counts['done'])} done, {failed} failed"
         )
         lines.append(f"{INDENT}{machine(beat)}")
         job = running.get(name)
         if job is None:
             lines.append(colour(DIM, f"{INDENT}idle"))
+        elif pool is not None and job["pool"] != pool:
+            lines.append(colour(DIM, f"{INDENT}busy"))  # a shared worker on another pool's job, which isn't shown
         else:
             if job["work_started_at"] is None:
                 took = colour(DIM, "setting up")

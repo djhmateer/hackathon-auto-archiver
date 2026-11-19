@@ -571,6 +571,34 @@ def test_a_pool_shows_only_its_own_sheets_jobs_and_workers(conn):
         assert shown in everything
 
 
+def test_a_pools_view_shows_the_shared_workers_but_not_another_pools_job(conn):
+    conn.execute("UPDATE pools SET shared = true WHERE name = 'hms'")  # the conftest's workers, eg worker41
+    glan = conn.execute("INSERT INTO organisations (name, pool) VALUES ('Org G', 'glan') RETURNING id").fetchone()["id"]
+    cir = conn.execute("INSERT INTO organisations (name, pool) VALUES ('Org C', 'cir') RETURNING id").fetchone()["id"]
+    glan_sheet, cir_sheet = add_sheet(conn, gid=2), add_sheet(conn, gid=3)
+    conn.execute("UPDATE sheets SET organisation_id = %s WHERE id = %s", (glan, glan_sheet))
+    conn.execute("UPDATE sheets SET organisation_id = %s WHERE id = %s", (cir, cir_sheet))
+    # glan and cir have no worker yet, so the shared workers can claim their jobs
+    finish(conn, run_job(conn, glan_sheet, 2, "glan-done.com", worker="worker41"), "done", "done")
+    run_job(conn, glan_sheet, 3, "glan-site.com", worker="worker41")
+    run_job(conn, cir_sheet, 4, "cir-site.com", worker="worker42")
+    conn.execute("INSERT INTO workers (name, pool) VALUES ('glanworker9', 'glan')")
+    for name in ("worker41", "worker42", "vm1", "glanworker9"):
+        db.beat(conn, f"worker-supervisor-{name}")
+
+    lines = dashboard.workers(conn, "abc1234", pool="cir")
+    screen = "\n".join(lines)
+    assert "glanworker9" not in screen  # glan's own worker
+    assert "vm1" in screen  # shared and idle
+    worker41 = lines[next(i for i, line in enumerate(lines) if "worker41" in line) :][:3]
+    assert "today " + dashboard.colour(GREEN, 0) + " done" in worker41[0]  # its glan job isn't counted
+    assert worker41[2] == dashboard.colour(dashboard.DIM, dashboard.INDENT + "busy")
+    assert "glan-site.com" not in screen
+    assert "cir-site.com" in screen  # worker42 is running this pool's job, so it's shown in full
+
+    assert "glan-site.com" in "\n".join(dashboard.workers(conn, "abc1234"))  # all pools: everything
+
+
 def test_next_pool_goes_through_each_pool_then_back_to_all():
     pools = ["cir", "glan", "hms"]
     assert dashboard.next_pool(None, pools) == "cir"

@@ -271,7 +271,8 @@ def get_jobs_after(conn: psycopg.Connection, job_id: int) -> list[dict]:
 def get_running_jobs(conn: psycopg.Connection) -> list[dict]:
     return conn.execute(
         """
-        SELECT j.*, s.worksheet, s.config, s.spreadsheet_name FROM jobs j JOIN sheets s ON s.id = j.sheet_id
+        SELECT j.*, s.worksheet, s.config, s.spreadsheet_name, o.pool
+        FROM jobs j JOIN sheets s ON s.id = j.sheet_id LEFT JOIN organisations o ON o.id = s.organisation_id
         WHERE j.status = 'running' ORDER BY j.id
         """
     ).fetchall()

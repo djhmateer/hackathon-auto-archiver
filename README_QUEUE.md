@@ -339,7 +339,7 @@ On the coordinator, `d` (or `poetry run python -m auto_archiver.job_queue.dashbo
 
 Green is fine, yellow is worth a look, red needs action.
 
-Press `p` to show one pool at a time (each pool that has workers, eg cir, then glan, then hms), then all again. Every section then shows only that pool's workers, sheets, jobs, sites and storage, and the title names the pool. Alerts aren't linked to a pool, so the Alerts section and the unsent alerts count are left out. It's for a screenshot to send to a client without the other clients' data.
+Press `p` to show one pool at a time (each pool that has workers, eg cir, then glan, then hms), then all again. Every section then shows only that pool's workers, sheets, jobs, sites and storage, and the title names the pool. The Workers section also shows the shared pool's workers (hms), as they can work for any pool: one running another pool's job just says `busy`, with no job details, and its counts for today are only this pool's jobs. Alerts aren't linked to a pool, so the Alerts section and the unsent alerts count are left out. It's for a screenshot to send to a client without the other clients' data.
 
 ### Morning report
 
