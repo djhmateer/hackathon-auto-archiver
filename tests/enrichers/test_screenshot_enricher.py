@@ -19,6 +19,8 @@ def mock_selenium_env(mocker):
     mock_popen = mocker.patch("subprocess.Popen")
     mocker.patch("selenium.webdriver.common.service.Service.is_connectable", return_value=True)
     mock_firefox_options = mocker.patch("selenium.webdriver.FirefoxOptions")
+    # no real browser, so no point waiting, eg 4 s for sleep_before_screenshot
+    mocker.patch("time.sleep")
 
     # Define side effect for `shutil.which`
     def mock_which_side_effect(dep):

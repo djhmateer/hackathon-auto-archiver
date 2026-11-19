@@ -277,16 +277,28 @@ def get_running_jobs(conn: psycopg.Connection) -> list[dict]:
     ).fetchall()
 
 
+# the job j's site has room for it: fewer of its jobs running than its limit, which is 1 unless the site is in
+# site_limits. For a query with the job as j, so claim_job, the coordinator and the dashboard agree
+SITE_HAS_ROOM = """
+    (SELECT count(*) FROM jobs other WHERE other.domain = j.domain AND other.status = 'running')
+        < COALESCE((SELECT max_running FROM site_limits WHERE site = j.domain), 1)
+"""
+
+
 def get_jobs_waiting_for_site(conn: psycopg.Connection) -> list[dict]:
-    """Queued jobs that could be claimed now, except that another job for their site is running"""
+    """
+    Queued jobs that could be claimed now, except that their site is running its limit of jobs. With each, the first
+    of those running jobs, so one row per queued job
+    """
     return conn.execute(
-        """
-        SELECT j.*, s.worksheet, s.config, s.spreadsheet_name, busy.id AS busy_job_id, busy.worker AS busy_worker
+        f"""
+        SELECT DISTINCT ON (j.id) j.*, s.worksheet, s.config, s.spreadsheet_name,
+            busy.id AS busy_job_id, busy.worker AS busy_worker
         FROM jobs j JOIN sheets s ON s.id = j.sheet_id
         JOIN jobs busy ON busy.domain = j.domain AND busy.status = 'running'
         WHERE j.status = 'queued' AND j.available_at <= now() AND s.enabled
-            AND (s.paused_until IS NULL OR s.paused_until <= now())
-        ORDER BY j.id
+            AND (s.paused_until IS NULL OR s.paused_until <= now()) AND NOT {SITE_HAS_ROOM}
+        ORDER BY j.id, busy.id
         """
     ).fetchall()
 
@@ -439,6 +451,14 @@ def count_active_jobs(conn: psycopg.Connection) -> dict:
 # a worker with no heartbeat for this long is down, so a shared pool's workers cover for it
 WORKER_DOWN_SECONDS = 30
 
+# an idle worker of the organisation o's pool: up (a heartbeat in the last WORKER_DOWN_SECONDS) and running nothing.
+# For a query with the organisation as o and a down_seconds parameter, so claim_job and the dashboard agree
+IDLE_WORKER = """
+    SELECT 1 FROM workers idle JOIN heartbeats h ON h.name = 'worker-supervisor-' || idle.name
+    WHERE idle.pool = o.pool AND h.beat_at > now() - make_interval(secs => %(down_seconds)s)
+        AND NOT EXISTS (SELECT 1 FROM jobs r WHERE r.worker = idle.name AND r.status = 'running')
+"""
+
 
 def claim_job(conn: psycopg.Connection, worker: str, git_commit: str = None) -> dict | None:
     """
@@ -446,11 +466,12 @@ def claim_job(conn: psycopg.Connection, worker: str, git_commit: str = None) -> 
     pool (the workers table). The sheet with the fewest running jobs for its weight goes first, then the oldest job.
 
     A worker in a shared pool (pools.shared, eg hms) can also claim another pool's jobs when none of that pool's
-    workers is idle. A worker with no heartbeat for WORKER_DOWN_SECONDS is down, so counts as busy. Its own pool's
-    jobs get no priority over the others: the same order applies to all of them.
+    workers is idle (IDLE_WORKER). A worker that's down counts as busy. Its own pool's jobs get no priority over the
+    others: the same order applies to all of them.
 
     Skips a job whose domain (its site, eg vimeo.com) already has a job running, so no site gets more than one at a
-    time. The lock makes claims take turns, or two workers could each see the site free and both claim it.
+    time, except the sites in site_limits (SITE_HAS_ROOM). The lock makes claims take turns, or two workers could
+    each see the site free and both claim it.
 
     Only the job's first claim adds the in progress status. That's found from its sheet writes rather than attempts, because
     a setup failure gives its attempt back.
@@ -459,7 +480,7 @@ def claim_job(conn: psycopg.Connection, worker: str, git_commit: str = None) -> 
         # released at the end of the transaction. The UPDATE after it sees any claim committed while it waited
         conn.execute("SELECT pg_advisory_xact_lock(%s)", (CLAIM_LOCK,))
         job = conn.execute(
-            """
+            f"""
             UPDATE jobs SET status = 'running', worker = %(worker)s, git_commit = %(git_commit)s, attempts = attempts + 1,
                 started_at = COALESCE(started_at, now()), work_started_at = NULL,
                 stage = NULL, stage_at = NULL,
@@ -469,17 +490,11 @@ def claim_job(conn: psycopg.Connection, worker: str, git_commit: str = None) -> 
                 SELECT j.id FROM jobs j JOIN sheets s ON s.id = j.sheet_id
                 WHERE j.status = 'queued' AND j.available_at <= now() AND s.enabled
                     AND (s.paused_until IS NULL OR s.paused_until <= now())
-                    AND NOT EXISTS (SELECT 1 FROM jobs busy WHERE busy.domain = j.domain AND busy.status = 'running')
+                    AND {SITE_HAS_ROOM}
                     AND s.organisation_id IN (
                         SELECT o.id FROM organisations o
                         JOIN workers me ON me.name = %(worker)s JOIN pools p ON p.name = me.pool
-                        WHERE o.pool = me.pool OR (p.shared AND NOT EXISTS (
-                            -- an idle worker of the job's pool: up, and running nothing
-                            SELECT 1 FROM workers idle JOIN heartbeats h ON h.name = 'worker-supervisor-' || idle.name
-                            WHERE idle.pool = o.pool
-                                AND h.beat_at > now() - make_interval(secs => %(down_seconds)s)
-                                AND NOT EXISTS (SELECT 1 FROM jobs r WHERE r.worker = idle.name AND r.status = 'running')
-                        ))
+                        WHERE o.pool = me.pool OR (p.shared AND NOT EXISTS ({IDLE_WORKER}))
                     )
                 ORDER BY (SELECT count(*) FROM jobs r WHERE r.sheet_id = j.sheet_id
                           AND r.status = 'running')::float / s.weight, j.id

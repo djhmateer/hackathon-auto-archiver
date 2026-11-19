@@ -4,6 +4,7 @@ pytest conftest file, for shared fixtures and configuration
 
 import os
 import pickle
+import socket
 from datetime import datetime, timezone
 from tempfile import TemporaryDirectory
 from typing import Dict, Tuple
@@ -37,6 +38,42 @@ def pytest_configure():
         logger.warning(
             f"Environment file {env_path} not found. Skipping loading environment variables, some tests may fail."
         )
+
+
+LOCAL_HOSTS = {"127.0.0.1", "::1", "localhost"}
+
+
+@pytest.fixture(autouse=True)
+def no_network(request, monkeypatch):
+    """
+    Fails any test that connects anywhere but this machine, so none can reach a real site, eg with real cookies.
+    The connection is refused, and the test fails at the end even if the code caught the error. The live tests
+    (-m download) are exempt. Only this process: an archiver child a test starts isn't covered
+    """
+    if request.node.get_closest_marker("download"):
+        yield
+        return
+    attempts = []
+    real_connect, real_connect_ex = socket.socket.connect, socket.socket.connect_ex
+
+    def check(address):
+        # a str is a Unix socket path, which is local
+        if isinstance(address, tuple) and address[0] not in LOCAL_HOSTS:
+            attempts.append(address)
+            raise ConnectionRefusedError(f"The tests mustn't use the network, but this one connected to {address}")
+
+    def connect(sock, address):
+        check(address)
+        return real_connect(sock, address)
+
+    def connect_ex(sock, address):
+        check(address)
+        return real_connect_ex(sock, address)
+
+    monkeypatch.setattr(socket.socket, "connect", connect)
+    monkeypatch.setattr(socket.socket, "connect_ex", connect_ex)
+    yield
+    assert not attempts, f"The tests mustn't use the network, but this one connected to {attempts}"
 
 
 # don't check for ytdlp updates in tests

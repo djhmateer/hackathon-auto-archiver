@@ -110,6 +110,29 @@ def test_a_site_busy_in_another_pool_still_waits(conn):
     assert db.claim_job(conn, "vm1") is None
 
 
+@pytest.mark.parametrize("site, claimed", [("instagram.com", [True, True, False]), ("drive.google.com", [True] * 3)])
+def test_a_site_in_site_limits_runs_up_to_its_limit_at_once(conn, site, claimed):
+    # the limits are the migration's: instagram.com 2, drive.google.com 100
+    sheet_id = add_sheet(conn)
+    for row in (2, 3, 4):
+        add_job(conn, sheet_id, row=row, domain=site)
+
+    assert [db.claim_job(conn, worker) is not None for worker in ("vm1", "vm2", "vm3")] == claimed
+
+
+def test_a_job_waiting_for_its_sites_limit_is_listed_once(conn):
+    sheet_id = add_sheet(conn)
+    first = add_job(conn, sheet_id, row=2, domain="instagram.com")
+    add_job(conn, sheet_id, row=3, domain="instagram.com")
+    db.claim_job(conn, "vm1")
+    add_job(conn, sheet_id, row=4, domain="instagram.com")
+    assert db.get_jobs_waiting_for_site(conn) == [], "one running, so room for another"
+
+    db.claim_job(conn, "vm2")
+    (waiting,) = db.get_jobs_waiting_for_site(conn)  # two running jobs block it, but it's one row
+    assert waiting["row_number"] == 4 and waiting["busy_job_id"] == first
+
+
 def add_cir_pool(conn, *workers, hms_shared=True) -> int:
     """A cir organisation's sheet, and the cir workers given, each with a fresh heartbeat"""
     cir = conn.execute("INSERT INTO organisations (name, pool) VALUES ('Org C', 'cir') RETURNING id").fetchone()["id"]

@@ -420,19 +420,16 @@ def waiting(conn, pool: str = None) -> list[str]:
                                  WHERE o.id = s.organisation_id) THEN 'no worker in its pool'
                 WHEN s.paused_until > now() THEN 'sheet is paused'
                 WHEN j.available_at > now() THEN 'retry'
-                WHEN EXISTS (SELECT 1 FROM jobs b WHERE b.domain = j.domain AND b.status = 'running')
-                    THEN 'site busy'
-                -- eg the hms pool's workers are busy while the glan workers are idle
-                WHEN NOT EXISTS (SELECT 1 FROM organisations o JOIN workers w ON w.pool = o.pool
-                                 WHERE o.id = s.organisation_id AND NOT EXISTS (
-                                     SELECT 1 FROM jobs r WHERE r.worker = w.name AND r.status = 'running'))
-                    THEN 'every worker in its pool is busy'
+                WHEN NOT {db.SITE_HAS_ROOM} THEN 'site busy'
+                -- eg the glan pool's workers are busy while the cir workers are idle. The same test as claim_job
+                WHEN NOT EXISTS (SELECT 1 FROM organisations o WHERE o.id = s.organisation_id AND EXISTS ({db.IDLE_WORKER}))
+                    THEN 'every worker in its pool is busy or down'
             END AS reason
         FROM jobs j JOIN sheets s ON s.id = j.sheet_id
         WHERE j.status = 'queued' AND {IN_POOL}
         ORDER BY j.id
         """,
-        {"pool": pool},
+        {"pool": pool, "down_seconds": db.WORKER_DOWN_SECONDS},
     ).fetchall()
     held = [row for row in rows if row["reason"]]
     lines = [colour(BOLD, "Waiting") + colour(DIM, f"   {len(held)} queued job(s) that can't be claimed yet")]

@@ -223,13 +223,17 @@ def test_waiting_jobs_say_why(conn):
     retry = add_job(conn, sheet_id, 4, "site1.com")
     conn.execute("UPDATE jobs SET available_at = now() + interval '1 hour' WHERE id = %s", (retry,))
     add_job(conn, off_sheet, 5, "site2.com")
+    db.beat(conn, "worker-supervisor-vm1")  # an idle worker that's up, so the pool isn't all busy
     add_job(conn, sheet_id, 6, "free.com")  # claimable, so not shown
+    run_job(conn, sheet_id, 7, "instagram.com", worker="vm2")
+    add_job(conn, sheet_id, 8, "instagram.com")  # its site_limits limit is 2, so claimable while row 7 runs
     screen = "\n".join(dashboard.waiting(conn))
     assert "3 queued job(s) that can't be claimed yet" in screen
     assert "row 3 busy.com: " + YELLOW + "site busy" in screen
     assert "row 4 site1.com: " + YELLOW + "retry at" in screen
     assert "row 5 site2.com: " + YELLOW + "sheet is off" in screen
     assert "free.com" not in screen
+    assert "row 8" not in screen
 
 
 def test_waiting_jobs_on_a_paused_sheet_show_its_setup_error(conn):
@@ -268,9 +272,11 @@ def test_a_job_whose_pool_is_all_busy_says_so(conn):
     screen = "\n".join(dashboard.waiting(conn))
     # the hms pool's workers are idle, but can't take it
     assert "1 queued job(s)" in screen
-    assert "row 3 site2.com: " + YELLOW + "every worker in its pool is busy" in screen
+    assert "row 3 site2.com: " + YELLOW + "every worker in its pool is busy or down" in screen
 
     conn.execute("INSERT INTO workers (name, pool) VALUES ('g2', 'glan')")
+    assert "1 queued job(s)" in "\n".join(dashboard.waiting(conn)), "g2 has no heartbeat, so it's down"
+    db.beat(conn, "worker-supervisor-g2")
     assert "0 queued job(s)" in "\n".join(dashboard.waiting(conn))  # g2 is free to take it
 
 

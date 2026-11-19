@@ -74,14 +74,20 @@ def sheet_url_hostname(url: str) -> str:
 COUNTRY_SECOND_LEVELS = {"ac", "co", "com", "edu", "gov", "net", "or", "org", "ne", "go"}
 # domains that are the same site
 SITE_ALIASES = {"youtu.be": "youtube.com", "twitter.com": "x.com"}
+# hostnames that are their own site, not part of google.com: the queue's site_limits lets their jobs run many at
+# once, while www.google.com, eg Search and Maps, runs one at a time
+OWN_SITES = {"drive.google.com", "docs.google.com"}
 
 
 def site_for_hostname(hostname: str) -> str:
     """
     The site a hostname belongs to, so the job queue runs one job per site at a time:
-    www.vimeo.com and player.vimeo.com are vimeo.com, youtu.be is youtube.com. An IP address is its own site
+    www.vimeo.com and player.vimeo.com are vimeo.com, youtu.be is youtube.com. An IP address is its own site, and so
+    is each of the OWN_SITES, eg drive.google.com
     """
     hostname = hostname.lower().rstrip(".")
+    if hostname in OWN_SITES:
+        return hostname
     try:
         ip_address(hostname)
         return hostname

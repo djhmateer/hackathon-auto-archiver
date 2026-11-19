@@ -167,7 +167,8 @@ class TestTwitterFxTwitterFallback:
 
     def test_fetch_fxtwitter_api_error(self, twitter_dropin):
         """Test handling of fxtwitter API errors."""
-        with patch("requests.get") as mock_get:
+        # time.sleep, so the retries don't really wait 0.5-2 s each
+        with patch("requests.get") as mock_get, patch("time.sleep"):
             mock_response = Mock()
             mock_response.status_code = 404
             mock_get.return_value = mock_response

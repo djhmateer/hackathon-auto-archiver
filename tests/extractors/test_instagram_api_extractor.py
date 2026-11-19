@@ -223,6 +223,7 @@ class TestInstagramAPIExtractor(TestExtractorBase):
         mock_highlights = mocker.patch.object(self.extractor, "download_all_highlights")
         mock_tagged = mocker.patch.object(self.extractor, "download_all_tagged")
         mock_stories = mocker.patch.object(self.extractor, "_download_stories_reusable")
+        mocker.patch.object(self.extractor, "download_from_url", return_value="profile.jpg")  # not the network
 
         self.extractor.full_profile = True
         mock_call.side_effect = [mock_user_response, mock_story_response]
@@ -257,6 +258,7 @@ class TestInstagramAPIExtractor(TestExtractorBase):
         mock_tagged = mocker.patch.object(self.extractor, "download_all_tagged")
         stories_tagged = mocker.patch.object(self.extractor, "_download_stories_reusable")
         mock_posts = mocker.patch.object(self.extractor, "download_all_posts")
+        mocker.patch.object(self.extractor, "download_from_url", return_value="profile.jpg")  # not the network
 
         self.extractor.full_profile = True
         mock_call.side_effect = [mock_user_response, Exception("Stories API failed"), Exception("Posts API failed")]

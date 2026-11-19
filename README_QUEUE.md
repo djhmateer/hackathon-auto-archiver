@@ -224,7 +224,7 @@ The Docker images aren't updated when you deploy by hand. To update them, follow
 
 ## Pools and organisations
 
-Workers are split into pools (`glan`, `hms`, `cir`), each a group of worker VMs. Every sheet belongs to an organisation, and every organisation to one pool. A worker claims jobs from the sheets of its own pool's organisations. A worker in a shared pool (`pools.shared`, set for `hms`) can also claim another pool's jobs while none of that pool's workers is idle. A worker with no heartbeat for 30 seconds (`WORKER_DOWN_SECONDS` in `db.py`) is down, so counts as busy, and a shared pool covers for it. A shared worker gives its own pool's jobs no priority: the same order (fewest running jobs per sheet for its weight, then the oldest) applies to all of them. A pool that isn't shared never helps another.
+Workers are split into pools (`glan`, `hms`, `cir`), each a group of worker VMs. Every sheet belongs to an organisation, and every organisation to one pool. A worker claims jobs from the sheets of its own pool's organisations. A worker in a shared pool (`pools.shared`, set for `hms`) can also claim another pool's jobs while none of that pool's workers is idle. A worker is up or down: down means no heartbeat for 30 seconds (`WORKER_DOWN_SECONDS` in `db.py`). A down worker counts as busy, and a shared pool covers for it. The dashboard's Waiting section uses the same test (`IDLE_WORKER` in `db.py`). A shared worker gives its own pool's jobs no priority: the same order (fewest running jobs per sheet for its weight, then the oldest) applies to all of them. A pool that isn't shared never helps another.
 
 - `pools` (`name`, `shared`): the pool names. Add one with `INSERT INTO pools (name) VALUES ('<pool>')`, and share one with `UPDATE pools SET shared = true WHERE name = '<pool>'`, no deploy needed. A shared pool's workers need every other pool's configs and Drive tokens, which `deploy-workers.sh` already copies to all workers.
 - `organisations` (`id`, `name`, `pool`): who owns sheets, eg for a future dashboard each organisation logs in to.
@@ -245,7 +245,12 @@ $Q "UPDATE workers SET pool = '<pool>' WHERE name = '<worker_hostname>'"   # to 
 
 ## Prioritising jobs
 
-There are no job priorities. A worker claims from the tab with the fewest running jobs for its weight first, then the oldest job (lowest id). It skips a job whose site (`jobs.domain`) already has a job running, so no site runs more than one at a time.
+There are no job priorities. A worker claims from the tab with the fewest running jobs for its weight first, then the oldest job (lowest id). It skips a job whose site (`jobs.domain`) already has a job running, so no site runs more than one at a time, unless the site is in the `site_limits` table (`site`, `max_running`):
+
+- `drive.google.com` and `docs.google.com`: 100, more than there are workers, so no limit, as their jobs use no cookies. Each is its own site rather than `google.com` (`OWN_SITES` in `utils/url.py`), so `www.google.com` (eg Search and Maps) still runs one at a time.
+- `instagram.com`: 2, so a long profile job doesn't hold back every post.
+
+To change one, no deploy needed: `$Q "UPDATE site_limits SET max_running = 3 WHERE site = '<site>'"`, or `INSERT INTO site_limits` to add a site, and `DELETE` to put it back to one at a time.
 
 So before killing anything, check what the jobs you want are waiting for. On the coordinator:
 
@@ -401,7 +406,7 @@ The coordinator's log is the best single view of the system. It records each job
 
 ## Troubleshooting
 
-**A queued job isn't being claimed.** Only one job per site runs at a time. The coordinator logs each job held back for this reason once: `Not claimed yet: job <id> … waits for its site <domain>, as job <id> on worker <worker_name> is running it`. A job can also be waiting for a retry delay, or belong to a sheet that is paused or not enabled.
+**A queued job isn't being claimed.** Only one job per site runs at a time, unless its site is in `site_limits` (see [Prioritising jobs](#prioritising-jobs)). The coordinator logs each job held back for this reason once: `Not claimed yet: job <id> … waits for its site <domain>, as job <id> on worker <worker_name> is running it`. A job can also be waiting for a retry delay, or belong to a sheet that is paused or not enabled.
 
 **A sheet has been paused.** After 3 setup failures in a row (the archiver exits before it starts work), the sheet is paused for 15 minutes and an alert is raised. The cause is usually a missing or broken config, or missing secrets on a worker. Check `logs/console/job_<id>.log` on the worker; the supervisor's error line names the file. The pause clears once a job from that sheet gets past setup.
 
