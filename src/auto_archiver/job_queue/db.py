@@ -248,10 +248,11 @@ def get_worker_heartbeats(conn: psycopg.Connection) -> list[dict]:
     """Each worker supervisor's name, how many seconds ago it last beat, and what it sent with the beat"""
     return conn.execute(
         f"""
-        SELECT substr(h.name, length('worker-supervisor-') + 1) AS worker, w.pool,
+        SELECT substr(h.name, length('worker-supervisor-') + 1) AS worker, w.pool, p.shared,
             extract(epoch FROM now() - h.beat_at)::int AS seconds_ago, h.git_commit,
             {", ".join(f"h.{column}" for column in STAT_COLUMNS)}
         FROM heartbeats h LEFT JOIN workers w ON w.name = substr(h.name, length('worker-supervisor-') + 1)
+            LEFT JOIN pools p ON p.name = w.pool
         WHERE h.name LIKE 'worker-supervisor-%' ORDER BY w.pool, h.name
         """
     ).fetchall()
@@ -435,10 +436,18 @@ def count_active_jobs(conn: psycopg.Connection) -> dict:
     return {"queued": 0, "running": 0, **{row["status"]: row["n"] for row in rows}}
 
 
+# a worker with no heartbeat for this long is down, so a shared pool's workers cover for it
+WORKER_DOWN_SECONDS = 30
+
+
 def claim_job(conn: psycopg.Connection, worker: str, git_commit: str = None) -> dict | None:
     """
     Claims the next job, or returns None if there isn't one. Only from sheets whose organisation is in this worker's
     pool (the workers table). The sheet with the fewest running jobs for its weight goes first, then the oldest job.
+
+    A worker in a shared pool (pools.shared, eg hms) can also claim another pool's jobs when none of that pool's
+    workers is idle. A worker with no heartbeat for WORKER_DOWN_SECONDS is down, so counts as busy. Its own pool's
+    jobs get no priority over the others: the same order applies to all of them.
 
     Skips a job whose domain (its site, eg vimeo.com) already has a job running, so no site gets more than one at a
     time. The lock makes claims take turns, or two workers could each see the site free and both claim it.
@@ -451,7 +460,7 @@ def claim_job(conn: psycopg.Connection, worker: str, git_commit: str = None) -> 
         conn.execute("SELECT pg_advisory_xact_lock(%s)", (CLAIM_LOCK,))
         job = conn.execute(
             """
-            UPDATE jobs SET status = 'running', worker = %s, git_commit = %s, attempts = attempts + 1,
+            UPDATE jobs SET status = 'running', worker = %(worker)s, git_commit = %(git_commit)s, attempts = attempts + 1,
                 started_at = COALESCE(started_at, now()), work_started_at = NULL,
                 stage = NULL, stage_at = NULL,
                 lease_token = gen_random_uuid(), lease_until = now() + interval '5 minutes'
@@ -462,7 +471,15 @@ def claim_job(conn: psycopg.Connection, worker: str, git_commit: str = None) -> 
                     AND (s.paused_until IS NULL OR s.paused_until <= now())
                     AND NOT EXISTS (SELECT 1 FROM jobs busy WHERE busy.domain = j.domain AND busy.status = 'running')
                     AND s.organisation_id IN (
-                        SELECT o.id FROM organisations o JOIN workers w ON w.pool = o.pool WHERE w.name = %s
+                        SELECT o.id FROM organisations o
+                        JOIN workers me ON me.name = %(worker)s JOIN pools p ON p.name = me.pool
+                        WHERE o.pool = me.pool OR (p.shared AND NOT EXISTS (
+                            -- an idle worker of the job's pool: up, and running nothing
+                            SELECT 1 FROM workers idle JOIN heartbeats h ON h.name = 'worker-supervisor-' || idle.name
+                            WHERE idle.pool = o.pool
+                                AND h.beat_at > now() - make_interval(secs => %(down_seconds)s)
+                                AND NOT EXISTS (SELECT 1 FROM jobs r WHERE r.worker = idle.name AND r.status = 'running')
+                        ))
                     )
                 ORDER BY (SELECT count(*) FROM jobs r WHERE r.sheet_id = j.sheet_id
                           AND r.status = 'running')::float / s.weight, j.id
@@ -470,7 +487,7 @@ def claim_job(conn: psycopg.Connection, worker: str, git_commit: str = None) -> 
             )
             RETURNING jobs.*, sheet.config, sheet.worksheet, sheet.spreadsheet_name
             """,
-            (worker, git_commit, worker),
+            {"worker": worker, "git_commit": git_commit, "down_seconds": WORKER_DOWN_SECONDS},
         ).fetchone()
         if job is None:
             return None

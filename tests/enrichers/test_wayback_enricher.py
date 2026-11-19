@@ -104,6 +104,17 @@ def test_enrich_post_failure(wayback_extractor_enricher, metadata, mock_is_auth_
     assert "Internet archive failed with status of 500" in metadata.get("wayback")
 
 
+def test_enrich_post_503_is_a_warning_not_an_error(
+    wayback_extractor_enricher, metadata, mock_is_auth_wall, mock_post_success, caplog
+):
+    # IA's "Temporarily Offline" page is their outage, so it shouldn't show as an error in the logs
+    mock_is_auth_wall(False)
+    mock_post_success(json_data={"error": "offline"}, status_code=503)
+    assert wayback_extractor_enricher.enrich(metadata) is False
+    assert "Internet archive failed with status of 503" in metadata.get("wayback")
+    assert [r.levelname for r in caplog.records if "Internet archive failed" in r.message] == ["WARNING"]
+
+
 def test_enrich_post_json_decode_error(wayback_extractor_enricher, metadata, mock_is_auth_wall, mocker):
     mock_is_auth_wall(False)
     resp = mocker.Mock(status_code=200)

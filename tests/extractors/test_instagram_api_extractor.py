@@ -236,6 +236,12 @@ class TestInstagramAPIExtractor(TestExtractorBase):
         mock_posts.assert_called_once_with(result, "123", max_to_download=math.inf)
         assert "errors" not in result.metadata
 
+    def test_download_stories_status_has_no_timestamp(self, metadata, mock_story_response, mocker):
+        # the status becomes the job's extractor, so a timestamp in it splits every run into its own group
+        mocker.patch.object(self.extractor, "_download_stories_reusable", return_value=mock_story_response)
+        result = self.extractor.download_stories(metadata, "test_user")
+        assert result.status == "insta stories: success"
+
     def test_download_profile_not_found(self, metadata, mocker):
         """Test profile not found error"""
         mock_call = mocker.patch.object(self.extractor, "call_api")

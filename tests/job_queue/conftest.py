@@ -65,6 +65,8 @@ def conn(schema):
             "TRUNCATE sheets, jobs, sheet_writes, admin_alerts, heartbeats, workers, organisations RESTART IDENTITY CASCADE"
         )
         conn.execute("INSERT INTO organisations (name, pool) VALUES ('Test organisation', 'hms')")
+        # pools aren't truncated, so undo any test's shared pool, and the migration's hms one
+        conn.execute("UPDATE pools SET shared = false")
         # the worker names the tests use, all in the hms pool
         for name in ("vm1", "vm2", "vm3", "worker41", "worker42", "glanworker1", "glanworker2"):
             conn.execute("INSERT INTO workers (name, pool) VALUES (%s, 'hms')", (name,))

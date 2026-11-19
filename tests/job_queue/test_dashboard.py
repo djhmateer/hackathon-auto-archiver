@@ -280,6 +280,16 @@ def test_a_worker_with_no_pool_is_red(conn):
     assert "pool " + RED + "none, so it claims nothing" in screen
 
 
+def test_a_worker_in_a_shared_pool_says_so(conn):
+    conn.execute("UPDATE pools SET shared = true WHERE name = 'hms'")
+    db.beat(conn, "worker-supervisor-vm1")
+    db.beat(conn, "worker-supervisor-cirworker1")
+    conn.execute("INSERT INTO workers (name, pool) VALUES ('cirworker1', 'cir')")
+    lines = dashboard.workers(conn, "abc1234")
+    assert "shared" in next(line for line in lines if "vm1" in line)
+    assert "shared" not in next(line for line in lines if "cirworker1" in line)
+
+
 def test_alerts_show_unsent_in_red_and_only_the_first_line(conn):
     db.add_alert(conn, "site_blocked", "site1.com blocked tab tab1 row 2\n\nURL: https://site1.com/post/2")
     db.add_alert(conn, "sheet_paused", "Sheet paused")
@@ -516,3 +526,48 @@ def test_set_result_does_nothing_outside_a_queue_job(conn, monkeypatch):
 )
 def test_step_result(worked, notes, expected):
     assert step_result(worked, notes, "found nothing to archive") == expected
+
+
+def test_finished_jobs_show_the_date_as_well_as_the_time(conn):
+    job = run_job(conn, add_sheet(conn), 2, "site1.com")
+    finish(conn, job, "failed", "failed")
+    finished = conn.execute("SELECT finished_at FROM jobs WHERE id = %s", (job["id"],)).fetchone()["finished_at"]
+    assert f"  {finished:%Y-%m-%d %H:%M} worker41" in "\n".join(dashboard.failures(conn))
+
+
+def test_a_pool_shows_only_its_own_sheets_jobs_and_workers(conn):
+    # the conftest's sheets and workers are in hms. Another client's sheet, job and worker in cir
+    hms_sheet = add_sheet(conn, gid=1)
+    cir = conn.execute("INSERT INTO organisations (name, pool) VALUES ('Org C', 'cir') RETURNING id").fetchone()["id"]
+    cir_sheet = conn.execute(
+        """
+        INSERT INTO sheets (spreadsheet_id, worksheet_gid, worksheet, config, enabled, spreadsheet_name, organisation_id)
+        VALUES ('spreadsheet2', 2, 'tab2', 'secrets/orchestration-example.yaml', true, 'Other Client', %s) RETURNING id
+        """,
+        (cir,),
+    ).fetchone()["id"]
+    conn.execute("INSERT INTO workers (name, pool) VALUES ('cirworker1', 'cir')")
+    db.beat(conn, "worker-supervisor-cirworker1")
+    db.beat(conn, "worker-supervisor-worker41")
+    finish(conn, run_job(conn, hms_sheet, 2, "hms-site.com"), "failed", "failed")
+    finish(conn, run_job(conn, cir_sheet, 3, "cir-site.com", worker="cirworker1"), "done", "wacz: success")
+    add_job(conn, cir_sheet, 4, "cir-queued.com")
+    db.add_alert(conn, "site_blocked", "an alert that could name any client")
+
+    screen = dashboard.render(conn, pool="hms")
+
+    assert "pool hms" in screen
+    assert "hms-site.com" in screen
+    for other in ("Other Client", "cir-site.com", "cir-queued.com", "cirworker1", "an alert", "unsent alerts"):
+        assert other not in screen
+    everything = dashboard.render(conn)
+    for shown in ("Other Client", "cir-site.com", "hms-site.com", "cirworker1", "an alert"):
+        assert shown in everything
+
+
+def test_next_pool_goes_through_each_pool_then_back_to_all():
+    pools = ["cir", "glan", "hms"]
+    assert dashboard.next_pool(None, pools) == "cir"
+    assert dashboard.next_pool("cir", pools) == "glan"
+    assert dashboard.next_pool("hms", pools) is None
+    assert dashboard.next_pool("gone", pools) is None  # a pool whose workers were removed

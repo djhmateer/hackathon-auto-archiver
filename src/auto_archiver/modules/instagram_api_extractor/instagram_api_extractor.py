@@ -316,7 +316,7 @@ class InstagramAPIExtractor(Extractor):
         if stories == []:
             return result.success("insta no story")
         result.set_title(f"stories {username} at {now}").set("#stories", len(stories))
-        return result.success(f"insta stories {now}")
+        return result.success("insta stories")
 
     def _download_stories_reusable(self, result: Metadata, username: str, max_to_download: int) -> list[dict]:
         stories = self.call_api("v1/user/stories/by/username", {"username": username})

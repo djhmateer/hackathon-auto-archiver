@@ -168,7 +168,7 @@ Before deploying, both scripts:
 
 **Adding a sheet.** Add its config to `CONFIGS` in both scripts, commit and push, then deploy the coordinator and the workers. At the end of its deploy, the coordinator runs `sync add` on `CONFIGS`: a config that isn't on the queue yet is registered and all its tabs are turned on, so new rows are queued within about 15 seconds. Every row with a URL and a blank status is queued at once. A config already on the queue is left as it is, even if its tabs are off (eg after a `rollback`), so a deploy never turns a sheet back on. Turn off any cron line for the sheet before deploying.
 
-`deploy-workers.sh` also copies the archiver's cookies, sessions and browser profile (its `SECRETS` list) to every worker, from your local `secrets/`, which is the master copy. It uses `rsync`, so only files that changed are sent. To add a file the archiver needs, add it to `SECRETS`. Service accounts (`secrets/service_account*.json`) go only to the coordinator, which reads and writes the sheets: `deploy-coordinator.sh` copies any that changed. If you deploy by hand, nothing is copied, so copy any files that have changed.
+`deploy-workers.sh` also copies the archiver's cookies, sessions and browser profile (its `SECRETS` list) to every worker, from your local `secrets/`, which is the master copy. It uses `rsync`, so only files that changed are sent. To add a file the archiver needs, add it to `SECRETS`. Service accounts (`secrets/service_account*.json`) go to the coordinator, which reads and writes the sheets: `deploy-coordinator.sh` copies any that changed. The one exception is `service_account_davemateer_gmail.json`, which is also in `SECRETS` because the workers' `gdrive_folder_extractor` reads Drive folders with it. If you deploy by hand, nothing is copied, so copy any files that have changed.
 
 Both scripts install Python packages exactly as pinned in the committed `poetry.lock`. To update packages, run `poetry update` on your own machine, run the tests, then commit and push the lock file. Never run `poetry update` on a VM: it changes `poetry.lock` there, and the next deploy's `git pull` then fails.
 
@@ -224,9 +224,9 @@ The Docker images aren't updated when you deploy by hand. To update them, follow
 
 ## Pools and organisations
 
-Workers are split into pools (`glan`, `hms`, `cir`), each a group of worker VMs. Every sheet belongs to an organisation, and every organisation to one pool. A worker only claims jobs from the sheets of its own pool's organisations, and an idle pool never helps another.
+Workers are split into pools (`glan`, `hms`, `cir`), each a group of worker VMs. Every sheet belongs to an organisation, and every organisation to one pool. A worker claims jobs from the sheets of its own pool's organisations. A worker in a shared pool (`pools.shared`, set for `hms`) can also claim another pool's jobs while none of that pool's workers is idle. A worker with no heartbeat for 30 seconds (`WORKER_DOWN_SECONDS` in `db.py`) is down, so counts as busy, and a shared pool covers for it. A shared worker gives its own pool's jobs no priority: the same order (fewest running jobs per sheet for its weight, then the oldest) applies to all of them. A pool that isn't shared never helps another.
 
-- `pools`: the pool names. Add one with `INSERT INTO pools (name) VALUES ('<pool>')`.
+- `pools` (`name`, `shared`): the pool names. Add one with `INSERT INTO pools (name) VALUES ('<pool>')`, and share one with `UPDATE pools SET shared = true WHERE name = '<pool>'`, no deploy needed. A shared pool's workers need every other pool's configs and Drive tokens, which `deploy-workers.sh` already copies to all workers.
 - `organisations` (`id`, `name`, `pool`): who owns sheets, eg for a future dashboard each organisation logs in to.
 - `sheets.organisation_id`: a sheet with none is never claimed. A new tab of a spreadsheet already in an organisation joins it. A new spreadsheet, added by `sync add` (eg in a deploy, which then logs a warning) or `register`, has none, so set it.
 - `workers` (`name`, `pool`): each worker VM, by its hostname. A worker that isn't here claims nothing, and its supervisor logs a warning saying so.
@@ -329,10 +329,12 @@ On the coordinator, `d` (or `poetry run python -m auto_archiver.job_queue.dashbo
 - queued jobs that can't be claimed yet, and why;
 - the 10 busiest sites in the last 24 hours, with done, failed, blocked and average time;
 - files and GB stored in the last 24 hours, and any job with files that couldn't be stored;
-- the last 5 failed or blocked jobs, and the last 5 finished;
+- the last 5 failed or blocked jobs, and the last 5 finished, with the date and time each finished (UTC);
 - unsent and recent alerts.
 
 Green is fine, yellow is worth a look, red needs action.
+
+Press `p` to show one pool at a time (each pool that has workers, eg cir, then glan, then hms), then all again. Every section then shows only that pool's workers, sheets, jobs, sites and storage, and the title names the pool. Alerts aren't linked to a pool, so the Alerts section and the unsent alerts count are left out. It's for a screenshot to send to a client without the other clients' data.
 
 ### Morning report
 

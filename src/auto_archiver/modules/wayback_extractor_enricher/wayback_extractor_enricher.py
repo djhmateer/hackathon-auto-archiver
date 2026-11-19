@@ -89,7 +89,12 @@ class WaybackExtractorEnricher(Enricher, Extractor):
                 error_content = r.text
             # DM 17th Nov 26 - a 500 returns a whole HTML page (140 KB in a console log), keep the start only
             error_content = str(error_content)[:200]
-            logger.error(em := f"Internet archive failed with status of {r.status_code}: {error_content}")
+            em = f"Internet archive failed with status of {r.status_code}: {error_content}"
+            # DM 19th Nov 26 - a 503 is IA "Temporarily Offline", their outage not ours, so not an error
+            if r.status_code == 503:
+                logger.warning(em)
+            else:
+                logger.error(em)
             to_enrich.set("wayback", em)
             return False
 

@@ -110,6 +110,61 @@ def test_a_site_busy_in_another_pool_still_waits(conn):
     assert db.claim_job(conn, "vm1") is None
 
 
+def add_cir_pool(conn, *workers, hms_shared=True) -> int:
+    """A cir organisation's sheet, and the cir workers given, each with a fresh heartbeat"""
+    cir = conn.execute("INSERT INTO organisations (name, pool) VALUES ('Org C', 'cir') RETURNING id").fetchone()["id"]
+    cir_sheet = add_sheet(conn, gid=2)
+    conn.execute("UPDATE sheets SET organisation_id = %s WHERE id = %s", (cir, cir_sheet))
+    for name in workers:
+        conn.execute("INSERT INTO workers (name, pool) VALUES (%s, 'cir')", (name,))
+        db.beat(conn, f"worker-supervisor-{name}")
+    conn.execute("UPDATE pools SET shared = %s WHERE name = 'hms'", (hms_shared,))
+    return cir_sheet
+
+
+def test_a_shared_pool_helps_when_every_worker_of_the_other_pool_is_busy(conn):
+    cir_sheet = add_cir_pool(conn, "c1")
+    add_job(conn, cir_sheet, row=2)
+    db.claim_job(conn, "c1")  # c1 now busy
+    waiting = add_job(conn, cir_sheet, row=3)
+
+    assert db.claim_job(conn, "vm1")["id"] == waiting  # vm1 is hms
+
+
+def test_a_shared_pool_leaves_the_job_to_an_idle_worker_of_its_pool(conn):
+    cir_sheet = add_cir_pool(conn, "c1", "c2")
+    add_job(conn, cir_sheet, row=2)
+    db.claim_job(conn, "c1")  # c1 busy, c2 idle
+    add_job(conn, cir_sheet, row=3)
+
+    assert db.claim_job(conn, "vm1") is None
+    assert db.claim_job(conn, "c2") is not None
+
+
+def test_a_worker_with_no_recent_heartbeat_counts_as_busy(conn):
+    cir_sheet = add_cir_pool(conn, "c1")
+    conn.execute("UPDATE heartbeats SET beat_at = now() - interval '1 minute'")  # c1 down
+    job = add_job(conn, cir_sheet)
+
+    assert db.claim_job(conn, "vm1")["id"] == job
+
+
+def test_a_pool_that_isnt_shared_never_helps(conn):
+    cir_sheet = add_cir_pool(conn, "c1", hms_shared=False)
+    conn.execute("UPDATE heartbeats SET beat_at = now() - interval '1 minute'")
+    add_job(conn, cir_sheet)
+
+    assert db.claim_job(conn, "vm1") is None
+
+
+def test_a_shared_worker_takes_the_oldest_job_not_its_own_pools_first(conn):
+    cir_sheet = add_cir_pool(conn)  # no cir worker, so none is idle
+    cir_job = add_job(conn, cir_sheet, row=2)
+    add_job(conn, add_sheet(conn, gid=1), row=3)  # hms, newer
+
+    assert db.claim_job(conn, "vm1")["id"] == cir_job
+
+
 def test_a_new_tab_gets_its_spreadsheets_organisation(conn):
     org = conn.execute("INSERT INTO organisations (name, pool) VALUES ('Org G', 'glan') RETURNING id").fetchone()["id"]
     # the tests' default organisation would hide a tab added with none
