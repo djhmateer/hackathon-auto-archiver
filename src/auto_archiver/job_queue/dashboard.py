@@ -20,6 +20,7 @@ from pathlib import Path
 from auto_archiver.job_queue import db
 from auto_archiver.job_queue.coordinator import SYNC_SECONDS, WORKER_QUIET_SECONDS
 from auto_archiver.job_queue.stage import time_limit_seconds
+from auto_archiver.job_queue.sync import QUIET_TAB_SECONDS
 from auto_archiver.job_queue.worker_supervisor import git_commit, machine_stats
 
 REFRESH_SECONDS = 2
@@ -31,7 +32,9 @@ TAB_WIDTH = 40
 SHEET_MIN = 10  # the fewest characters of a spreadsheet's name a cut tab name keeps
 FAILURES = 5
 SITES = 10
-READ_LATE_SECONDS = 60  # sync reads every tab that's on every SYNC_SECONDS
+# a quiet tab is due every QUIET_TAB_SECONDS, but read only when a pass starts, and after the spreadsheets before it
+# in that pass (~50s when all the quiet tabs are due together), so allow for both
+READ_LATE_SECONDS = QUIET_TAB_SECONDS + 3 * 60
 QUEUED_LONG_SECONDS = 60 * 60
 WORKER_WIDTH = 12  # eg glanworker1
 POOL_WIDTH = 5  # eg glan
@@ -244,7 +247,7 @@ def sheets(conn, pool: str = None) -> list[str]:
         + colour(
             DIM,
             "   done and failed are for the last 24h; rows have a URL, blank of them have no status; "
-            f"each tab is read every {SYNC_SECONDS}s, red if not for {ago(READ_LATE_SECONDS)}",
+            f"active tabs are read every {SYNC_SECONDS}s, quiet ones every {ago(QUIET_TAB_SECONDS)}, red if not for {ago(READ_LATE_SECONDS)}",
         ),
         colour(
             DIM,

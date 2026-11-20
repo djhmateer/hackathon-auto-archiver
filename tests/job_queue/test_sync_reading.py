@@ -60,7 +60,7 @@ def test_add_registers_a_new_config_and_turns_it_on(conn, config):
 
 def test_add_leaves_a_config_already_on_the_queue_as_it_is(conn, config):
     sheet = FakeSpreadsheet([tab_of()])
-    sync.register(conn, CONFIG, opener_for(sheet))  # off, eg after a rollback
+    sync.register(conn, CONFIG, opener_for(sheet))  # off, eg after `sync disable`
     assert sync.add(conn, CONFIG, opener_for(sheet)) is None
     assert [s["enabled"] for s in db.get_sheets(conn)] == [False]
 
@@ -304,3 +304,75 @@ def test_after_each_runs_after_every_spreadsheet_even_a_broken_one(conn, config)
     calls = []
     sync.sync_cycle(conn, opener, after_each=lambda: calls.append(1))
     assert len(calls) == 2
+
+
+@pytest.fixture
+def quiet_tabs_every_5_minutes(monkeypatch):
+    monkeypatch.setattr(sync, "QUIET_TAB_SECONDS", 5 * 60)
+
+
+def test_quiet_tab_is_read_every_5_minutes_not_every_pass(conn, config, quiet_tabs_every_5_minutes):
+    sheet = FakeSpreadsheet([tab_of(row("https://example.com/1", status="done"))])
+    setup_sheet(conn, sheet)
+    opened = []
+
+    def opener(settings, spreadsheet_id=None):
+        opened.append(spreadsheet_id)
+        return sheet
+
+    sync.sync_cycle(conn, opener)
+    sync.sync_cycle(conn, opener)
+    assert len(opened) == 1
+
+    for sheet_id in sync._last_read:
+        sync._last_read[sheet_id] -= 5 * 60
+    sync.sync_cycle(conn, opener)
+    assert len(opened) == 2
+
+
+def test_tab_with_a_job_this_week_is_read_every_pass(conn, config, quiet_tabs_every_5_minutes):
+    sheet = FakeSpreadsheet([tab_of(row("https://example.com/1"))])
+    setup_sheet(conn, sheet)
+    run(conn, sheet)
+    assert len(queued(conn)) == 1
+    calls = sheet.batch_calls
+
+    run(conn, sheet)
+    assert sheet.batch_calls == calls * 2
+
+
+def test_tab_whose_last_job_is_older_than_a_week_is_quiet(conn, config, quiet_tabs_every_5_minutes):
+    sheet = FakeSpreadsheet([tab_of(row("https://example.com/1"))])
+    setup_sheet(conn, sheet)
+    run(conn, sheet)
+    conn.execute("UPDATE jobs SET added_at = now() - interval '8 days'")
+    calls = sheet.batch_calls
+
+    run(conn, sheet)
+    assert sheet.batch_calls == calls
+
+
+def test_only_the_due_tabs_of_a_spreadsheet_are_read(conn, config, quiet_tabs_every_5_minutes):
+    sheet = FakeSpreadsheet(
+        [
+            tab_of(row("https://example.com/1"), gid=1),
+            tab_of(row("https://example.com/2", status="done"), gid=2, title="Tab 2"),
+        ]
+    )
+    setup_sheet(conn, sheet)
+    run(conn, sheet)
+    sheet.ranges_read.clear()
+
+    run(conn, sheet)
+    assert sheet.ranges_read and all(r.startswith("'Tab 1'!") for r in sheet.ranges_read)
+
+
+def test_quiet_tab_whose_read_failed_is_read_again_next_pass(conn, config, quiet_tabs_every_5_minutes, mocker):
+    sheet = FakeSpreadsheet([tab_of(row("https://example.com/1", status="done"))])
+    setup_sheet(conn, sheet)
+    mocker.patch.object(sync, "read_tabs", side_effect=RuntimeError("Sheets timeout"))
+    run(conn, sheet)
+    mocker.stopall()
+
+    run(conn, sheet)
+    assert sheet.batch_calls == 2

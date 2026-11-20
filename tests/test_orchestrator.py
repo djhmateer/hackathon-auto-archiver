@@ -459,6 +459,36 @@ def test_reachable_site_runs_all_modules(mocker):
     connect.assert_not_called()
 
 
+def test_extractor_can_stop_the_other_extractors_and_enrichers(mocker):
+    ran = []
+
+    def module(name, stops=False):
+        def download(item):
+            ran.append(name)
+            if stops:
+                item.set_context("stop_archiving", True)
+            return False
+
+        m = mocker.Mock()
+        m.name = name
+        m.sanitize_url.side_effect = lambda u: u
+        m.download.side_effect = download
+        m.enrich.side_effect = lambda item: ran.append(name)
+        return m
+
+    o = ArchivingOrchestrator()
+    o.config = {}
+    o.disconnect_vpn = mocker.Mock()
+    o.extractors = [module("telethon_extractor", stops=True), module("wacz_extractor_enricher")]
+    o.enrichers = [module("wayback_extractor_enricher")]
+    o.databases, o.storages = [], []
+    o.formatters = [mocker.Mock(format=mocker.Mock(return_value=None))]
+    result = o.archive(Metadata().set_url("https://t.me/c/123/456"))
+
+    assert ran == ["telethon_extractor"]
+    assert not result.is_success()
+
+
 @pytest.mark.parametrize("status, level", [(404, "WARNING"), (500, "ERROR")])
 def test_extractor_404_is_a_warning_other_failures_are_errors(mocker, caplog, status, level):
     mocker.patch("socket.create_connection")

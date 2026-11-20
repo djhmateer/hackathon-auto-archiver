@@ -2,7 +2,7 @@
 Sheet sync: reads the sheets and works out which rows need a job. See queue-spec.md
 
 decide() holds the sync rules with no network or database. They run on each tab with sheets.enabled on, adding jobs
-and sheet writes, as the queue owns the tab. A tab that's off isn't read, as cron still owns it.
+and sheet writes. A tab that's off isn't read, eg a test spreadsheet turned off with `sync disable`.
 
 Sync only ever connects to Google read-only. The sheet writer is the only part that writes to a sheet.
 
@@ -33,6 +33,12 @@ READ_ONLY_SCOPES = [
 SHEETS_TIMEOUT_SECONDS = 60
 SYNC_INTERVAL_SECONDS = 60
 SLOW_SPREADSHEET_SECONDS = 5  # a spreadsheet whose sync takes longer is logged with where the time went
+# DM 20th Nov 26 - a pass over every tab took ~50s, so new rows waited up to a minute. Now a tab with a job created in
+# the last ACTIVE_DAYS is read every pass (the coordinator's SYNC_SECONDS, 15s), and the rest every QUIET_TAB_SECONDS
+ACTIVE_DAYS = 7
+QUIET_TAB_SECONDS = 5 * 60
+# when sync last read each tab, by sheets.id, in time.monotonic() seconds
+_last_read = {}
 OPTIONAL_COLUMNS = ("folder",)
 
 ADD = "add"
@@ -268,7 +274,7 @@ def register(conn, config_path: str, opener=open_spreadsheet) -> int:
 def add(conn, config_path: str, opener=open_spreadsheet) -> int | None:
     """
     For a deploy: registers a config that isn't on the queue yet and turns its tabs on. Returns how many tabs, or None
-    if it was already there. One that is, eg turned off by rollback, is left as it is
+    if it was already there. One that is, eg turned off by `sync disable`, is left as it is
     """
     if any(sheet["config"] == config_path for sheet in db.get_sheets(conn)):
         return None
@@ -304,12 +310,25 @@ def live_tab(
             db.add_alert_once(conn, "sheet_disagrees", f"Sheet {sheet_id} row {action.row}: {action.message}")
 
 
+def is_due(sheet: dict, active: set[int]) -> bool:
+    """
+    Whether to read the tab this pass: it's on (sheets.enabled), and it's active or
+    hasn't been read for QUIET_TAB_SECONDS, or ever
+    """
+    last_read = _last_read.get(sheet["id"], float("-inf"))
+    return sheet["enabled"] and (sheet["id"] in active or time.monotonic() - last_read >= QUIET_TAB_SECONDS)
+
+
 def sync_cycle(conn, opener=open_spreadsheet, after_each=None) -> None:
     """
-    One pass over every spreadsheet. A failure only loses that spreadsheet's turn. after_each runs after each
-    spreadsheet, eg the sheet writer, so a long pass doesn't hold it up
+    One pass over the spreadsheets with a tab that's due (see is_due), reading only those tabs. A failure only
+    loses that spreadsheet's turn. after_each runs after each spreadsheet, eg the sheet writer, so a long pass doesn't
+    hold it up
     """
-    spreadsheets = {(sheet["spreadsheet_id"], sheet["config"]) for sheet in db.get_sheets(conn)}
+    active = db.get_recently_active_sheet_ids(conn, ACTIVE_DAYS)
+    spreadsheets = {
+        (sheet["spreadsheet_id"], sheet["config"]) for sheet in db.get_sheets(conn) if is_due(sheet, active)
+    }
     for spreadsheet_id, config_path in sorted(spreadsheets):
         try:
             started = time.monotonic()
@@ -345,8 +364,8 @@ def sync_cycle(conn, opener=open_spreadsheet, after_each=None) -> None:
                 for sheet in db.get_sheets(conn)
                 if sheet["spreadsheet_id"] == spreadsheet_id and sheet["config"] == config_path
             }
-            # a tab that's off isn't read, as cron still owns it
-            tabs = [tab for tab in tabs if tab.id in sheets and sheets[tab.id]["enabled"]]
+            # a tab new this pass has never been read, so is due and its rows are queued straight away
+            tabs = [tab for tab in tabs if tab.id in sheets and is_due(sheets[tab.id], active)]
             rows_by_tab = read_tabs(spreadsheet, tabs, settings)
             read = time.monotonic()
             for gid, rows in rows_by_tab.items():
@@ -360,6 +379,9 @@ def sync_cycle(conn, opener=open_spreadsheet, after_each=None) -> None:
                     f"{db.describe_tab(spreadsheet.title, title)} (live): {len(rows)} row(s) with a URL, "
                     f"{blank} blank status",
                 )
+            # only once all went well, so a failure is retried next pass
+            for tab in tabs:
+                _last_read[sheets[tab.id]["id"]] = time.monotonic()
             took = time.monotonic() - started
             if took >= SLOW_SPREADSHEET_SECONDS:
                 logger.info(
@@ -384,25 +406,25 @@ def main() -> None:
     run_parser = commands.add_parser("run", help="sync every registered tab that's on")
     run_parser.add_argument("--once", action="store_true", help="one pass, then exit")
     for command, help_text in (
-        ("enable", "move all of a spreadsheet's tabs to the queue. Turn its cron line off first"),
-        ("rollback", "take a spreadsheet off the queue, and say when its cron line can go back on"),
+        ("enable", "turn on all of a spreadsheet's tabs, so sync reads them"),
+        ("disable", "turn off all of a spreadsheet's tabs and cancel their waiting jobs; its config stays registered"),
     ):
         commands.add_parser(command, help=help_text).add_argument("spreadsheet_id")
     args = parser.parse_args()
 
     if args.command == "enable":
         with db.connect() as conn:
-            logger.info(f"{db.enable_spreadsheet(conn, args.spreadsheet_id)} tab(s) are now on the queue")
+            logger.info(f"{db.enable_spreadsheet(conn, args.spreadsheet_id)} tab(s) are now on")
         return
 
-    if args.command == "rollback":
+    if args.command == "disable":
         with db.connect() as conn:
-            cancelled, running, unwritten = db.rollback_spreadsheet(conn, args.spreadsheet_id)
-        logger.info(f"Off the queue. Cancelled {cancelled}, still running {running}, sheet writes to do {unwritten}")
+            cancelled, running, unwritten = db.disable_spreadsheet(conn, args.spreadsheet_id)
+        logger.info(f"Turned off. Cancelled {cancelled}, still running {running}, sheet writes to do {unwritten}")
         if running or unwritten:
-            logger.warning("Keep cron off and the coordinator running, then run this again")
+            logger.warning("Its running jobs will still finish and be written to the sheet. Run this again to check")
         else:
-            logger.success("Cron can go back on")
+            logger.success("Nothing left to finish or write")
         return
 
     if args.command == "add":

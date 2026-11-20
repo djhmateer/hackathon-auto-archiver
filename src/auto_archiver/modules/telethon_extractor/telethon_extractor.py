@@ -200,8 +200,14 @@ class TelethonExtractor(Extractor):
                 except ValueError as e:
                     logger.error(f"Could not fetch telegram URL possibly it's private: {e}")
                     # DM 3rd Oct 26 - the other extractors still archive the login page, so flag it on the sheet
-                    if is_private:
+                    # DM 20th Nov 26 - and stop the row there: WACZ/Wayback of a t.me/c link only get the login page,
+                    # which showed on the sheet as "wacz: success". Unless the account's channels couldn't be loaded,
+                    # as then it may well be a member
+                    if is_private and getattr(self, "_dialogs_failed", False):
                         item.add_status_note("possible private channel issue - telegram account may not be a member")
+                    elif is_private:
+                        item.add_status_note("private channel - telegram account not a member")
+                        item.set_context("stop_archiving", True)
                     return False
                 except ChannelInvalidError as e:
                     logger.error(
@@ -268,6 +274,7 @@ class TelethonExtractor(Extractor):
                 self.client.get_dialogs()
             except Exception as e:
                 logger.warning(f"Could not load dialogs to resolve private channel {chat}: {e}")
+                self._dialogs_failed = True
 
     def _get_media_posts_in_group(self, chat, original_post, max_amp=10):
         """

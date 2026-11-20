@@ -38,11 +38,16 @@ def test_env_file(tmp_path, monkeypatch):
 
 
 @pytest.fixture(autouse=True)
-def fresh_sync_logs():
-    """sync only logs a line when it changes, so each test starts with nothing logged"""
+def fresh_sync_logs(monkeypatch):
+    """
+    sync only logs a line when it changes, so each test starts with nothing logged. And it reads every tab every pass,
+    so a test can sync the same quiet tab twice (test_sync_reading's due tab tests set QUIET_TAB_SECONDS back)
+    """
     from auto_archiver.job_queue import sync
 
     sync._last_logged.clear()
+    sync._last_read.clear()
+    monkeypatch.setattr(sync, "QUIET_TAB_SECONDS", 0)
 
 
 @pytest.fixture(autouse=True)

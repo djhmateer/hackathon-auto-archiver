@@ -383,37 +383,37 @@ def test_cancelling_a_job_requeued_after_a_claim_clears_the_row(conn, sheet_id, 
     assert cell(tab, "B2") == ""
 
 
-def test_rollback_cancels_waiting_jobs_and_clears_their_rows(conn, sheet_id, sheet, tab):
+def test_disable_cancels_waiting_jobs_and_clears_their_rows(conn, sheet_id, sheet, tab):
     run_sync(conn, sheet)
     run_writer(conn, sheet)
     assert cell(tab, "B2") == "Queued"
 
-    assert db.rollback_spreadsheet(conn, "spreadsheet1") == (1, 0, 1)
+    assert db.disable_spreadsheet(conn, "spreadsheet1") == (1, 0, 1)
     assert claim(conn) is None
     run_writer(conn, sheet)
     assert cell(tab, "B2") == ""
-    assert db.rollback_spreadsheet(conn, "spreadsheet1") == (0, 0, 0)
+    assert db.disable_spreadsheet(conn, "spreadsheet1") == (0, 0, 0)
     run_sync(conn, sheet)
-    assert jobs(conn)[0]["status"] == "cancelled" and len(jobs(conn)) == 1, "cron has the row now"
+    assert jobs(conn)[0]["status"] == "cancelled" and len(jobs(conn)) == 1, "not queued again while off"
 
 
-def test_rollback_waits_for_a_running_job_to_reach_the_sheet(conn, sheet_id, sheet, tab):
+def test_disable_waits_for_a_running_job_to_reach_the_sheet(conn, sheet_id, sheet, tab):
     run_sync(conn, sheet)
     run_writer(conn, sheet)
     job = claim(conn)
     run_writer(conn, sheet)
-    assert db.rollback_spreadsheet(conn, "spreadsheet1") == (0, 1, 0)
+    assert db.disable_spreadsheet(conn, "spreadsheet1") == (0, 1, 0)
 
     db.finish_job(conn, job["id"], job["lease_token"], "done", {"status": "ok"})
-    assert db.rollback_spreadsheet(conn, "spreadsheet1") == (0, 0, 1)
+    assert db.disable_spreadsheet(conn, "spreadsheet1") == (0, 0, 1)
     run_writer(conn, sheet)
     assert cell(tab, "B2") == "ok"
-    assert db.rollback_spreadsheet(conn, "spreadsheet1") == (0, 0, 0)
+    assert db.disable_spreadsheet(conn, "spreadsheet1") == (0, 0, 0)
 
 
-def test_rollback_only_touches_its_own_spreadsheet(conn, sheet_id, sheet):
+def test_disable_only_touches_its_own_spreadsheet(conn, sheet_id, sheet):
     run_sync(conn, sheet)
-    assert db.rollback_spreadsheet(conn, "another-spreadsheet") == (0, 0, 0)
+    assert db.disable_spreadsheet(conn, "another-spreadsheet") == (0, 0, 0)
     assert db.get_sheets(conn)[0]["enabled"] is True
     assert jobs(conn)[0]["status"] == "queued"
 
@@ -433,22 +433,24 @@ def test_new_tab_on_a_moved_spreadsheet_is_archived(conn, sheet_id, sheet, tab):
     assert {j["url"] for j in jobs(conn)} == {URL, "https://example.com/post/2"}
 
 
-def test_new_tab_on_a_spreadsheet_still_on_cron_stays_off(conn, config, sheet, tab):
+def test_spreadsheet_with_every_tab_off_is_not_opened(conn, config, sheet, tab):
+    # none of its tabs is on, so none is due: a new tab is added (and on) once a tab is turned on
     sync.register(conn, CONFIG, opener_for(sheet))
     sheet.tabs.append(FakeTab(2, "New tab", [list(HEADERS), row()]))
     run_sync(conn, sheet)
-    assert [s["enabled"] for s in db.get_sheets(conn)] == [False, False]
+    assert [s["enabled"] for s in db.get_sheets(conn)] == [False]
+    assert sheet.batch_calls == 0
 
 
-def test_commands_say_when_cron_can_go_back_on(conn, sheet_id, sheet, monkeypatch, database_url, caplog):
+def test_disable_then_enable(conn, sheet_id, sheet, monkeypatch, database_url, caplog):
     run_sync(conn, sheet)
-    monkeypatch.setattr("sys.argv", ["sync", "rollback", "spreadsheet1"])
+    monkeypatch.setattr("sys.argv", ["sync", "disable", "spreadsheet1"])
     sync.main()
-    assert "Keep cron off" in caplog.text
+    assert "Its running jobs will still finish" in caplog.text
     run_writer(conn, sheet)
     caplog.clear()
     sync.main()
-    assert "Cron can go back on" in caplog.text
+    assert "Nothing left to finish or write" in caplog.text
 
     monkeypatch.setattr("sys.argv", ["sync", "enable", "spreadsheet1"])
     sync.main()

@@ -329,11 +329,11 @@ def test_sheets_show_what_sync_last_read(conn):
     add_sheet(conn, gid=4, enabled=False)
     db.save_tab_read(conn, read, 5907, 3)
     db.save_tab_read(conn, late, 10, 0)
-    conn.execute("UPDATE sheets SET last_read_at = now() - interval '5 minutes' WHERE id = %s", (late,))
+    conn.execute("UPDATE sheets SET last_read_at = now() - interval '10 minutes' WHERE id = %s", (late,))
     lines = dashboard.sheets(conn)[2:]
     assert "  5907      3   " + GREEN + "0s ago" in lines[0]
     assert RED + "never" in lines[1]
-    assert RED + "5m ago" in lines[2]
+    assert RED + "10m ago" in lines[2]
     assert dashboard.DIM + "never" in lines[3]
 
 

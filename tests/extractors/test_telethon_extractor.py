@@ -155,7 +155,8 @@ def test_private_channel_not_found_adds_status_note(telethon_with_mock_client):
     item = mocker_item("https://t.me/c/1274414965/107959")
 
     assert telethon_with_mock_client.download(item) is False
-    assert item.get_status_notes() == ["possible private channel issue - telegram account may not be a member"]
+    assert item.get_status_notes() == ["private channel - telegram account not a member"]
+    assert item.get_context("stop_archiving") is True
 
 
 def test_public_channel_not_found_adds_no_status_note(telethon_with_mock_client):
@@ -197,3 +198,15 @@ def mocker_item(url):
     from auto_archiver.core import Metadata
 
     return Metadata().set_url(url)
+
+
+def test_private_channel_when_dialogs_failed_to_load_does_not_stop_the_row(telethon_with_mock_client):
+    client = telethon_with_mock_client.client
+    client.get_input_entity.side_effect = ValueError("Could not find the input entity")
+    client.get_dialogs.side_effect = ConnectionError("network down")
+    client.get_messages.side_effect = ValueError("Could not find the input entity")
+    item = mocker_item("https://t.me/c/1274414965/107959")
+
+    assert telethon_with_mock_client.download(item) is False
+    assert item.get_status_notes() == ["possible private channel issue - telegram account may not be a member"]
+    assert item.get_context("stop_archiving") is None

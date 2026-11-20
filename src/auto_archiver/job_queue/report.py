@@ -20,7 +20,7 @@ from auto_archiver.job_queue.worker_supervisor import git_commit, machine_stats
 from auto_archiver.utils.custom_logger import logger
 
 REPORT_DIR = Path.home() / "reports"
-NOT_READ_SECONDS = 5 * 60  # sync reads every tab that's on every 15s
+NOT_READ_SECONDS = 10 * 60  # sync reads an active tab every 15s, a quiet one every 5 min (sync.QUIET_TAB_SECONDS)
 QUEUED_TOO_LONG_SECONDS = 6 * 60 * 60
 UNWRITTEN_TOO_LONG_SECONDS = 10 * 60
 HEARTBEAT_LATE_SECONDS = 60

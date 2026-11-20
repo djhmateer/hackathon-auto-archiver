@@ -962,6 +962,11 @@ Here's how that would look: \n\nsteps:\n  extractors:\n  - [your_extractor_name_
                 set_result(*step_result(result.is_success(), new_notes, "found nothing to archive"))
             if result.is_success():
                 break
+            # set by an extractor that knows nothing else can archive the URL (eg telethon, for a private channel)
+            if result.get_context("stop_archiving"):
+                logger.info(f"{a.name} says nothing else can archive {url}, skipping the other extractors and enrichers")
+                enrichers = []
+                break
 
         if not result.is_success():
             logger.warning(f"No successful capture for {url}, status={result.status!r}, notes={result.get_status_notes()}")

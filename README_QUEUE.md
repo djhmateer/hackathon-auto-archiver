@@ -13,7 +13,7 @@ How to install, run, deploy and operate the Postgres job queue. The design, and 
 - [Pools and organisations](#pools-and-organisations)
 - [Prioritising jobs](#prioritising-jobs)
 - [Updating the OS](#updating-the-os)
-- [Moving a spreadsheet from cron to the queue](#moving-a-spreadsheet-from-cron-to-the-queue)
+- [Turning a spreadsheet on and off](#turning-a-spreadsheet-on-and-off)
 - [Stopping a worker](#stopping-a-worker)
 - [Monitoring](#monitoring)
 - [Troubleshooting](#troubleshooting)
@@ -91,7 +91,7 @@ Then:
 
 1. Copy each sheet's config and service account into `secrets/`.
 2. If a firewall sits between the coordinator and the workers, open port 5432 to the workers.
-3. Register each sheet. Its tabs start **off**, so sync doesn't read them until you enable them (see [Moving a spreadsheet from cron to the queue](#moving-a-spreadsheet-from-cron-to-the-queue)):
+3. Register each sheet. Its tabs start **off**, so sync doesn't read them until you enable them (see [Turning a spreadsheet on and off](#turning-a-spreadsheet-on-and-off)):
 
    ```bash
    poetry run python -m auto_archiver.job_queue.sync register secrets/<config>.yaml
@@ -155,7 +155,6 @@ Notes:
 
 - A worker runs one job at a time. To add capacity, add VMs.
 - Workers reboot daily at 05:20 UK time. If a job is still running at that point, the reboot waits for it, for as long as its time limit (3 h, 12 h for a Google Drive folder). To change the time, edit `/etc/systemd/system/aa-worker-supervisor.service` and run `sudo systemctl daemon-reload`.
-- A VM should run either the old cron archiver or a worker supervisor, never both.
 
 ## Deploying updates
 
@@ -166,7 +165,7 @@ Before deploying, both scripts:
 - refuse to run if there are uncommitted changes (including untracked files) or commits that haven't been pushed to `origin/main`, because the VMs pull from GitHub;
 - copy the sheet configs listed in `CONFIGS` from your local `secrets/` to the coordinator and every worker. The coordinator writes cells using its copy's column names, and the workers archive with theirs, so a stale copy silently drops new columns. When you add a sheet, add its config to `CONFIGS` in **both** scripts.
 
-**Adding a sheet.** Add its config to `CONFIGS` in both scripts, commit and push, then deploy the coordinator and the workers. At the end of its deploy, the coordinator runs `sync add` on `CONFIGS`: a config that isn't on the queue yet is registered and all its tabs are turned on, so new rows are queued within about 15 seconds. Every row with a URL and a blank status is queued at once. A config already on the queue is left as it is, even if its tabs are off (eg after a `rollback`), so a deploy never turns a sheet back on. Turn off any cron line for the sheet before deploying.
+**Adding a sheet.** Add its config to `CONFIGS` in both scripts, commit and push, then deploy the coordinator and the workers. At the end of its deploy, the coordinator runs `sync add` on `CONFIGS`: a config that isn't on the queue yet is registered and all its tabs are turned on, so new rows are queued within about 15 seconds. Every row with a URL and a blank status is queued at once. A config already on the queue is left as it is, even if its tabs are off (eg after `sync disable`), so a deploy never turns a sheet back on.
 
 `deploy-workers.sh` also copies the archiver's cookies, sessions and browser profile (its `SECRETS` list) to every worker, from your local `secrets/`, which is the master copy. It uses `rsync`, so only files that changed are sent. To add a file the archiver needs, add it to `SECRETS`. Service accounts (`secrets/service_account*.json`) go to the coordinator, which reads and writes the sheets: `deploy-coordinator.sh` copies any that changed. The one exception is `service_account_davemateer_gmail.json`, which is also in `SECRETS` because the workers' `gdrive_folder_extractor` reads Drive folders with it. If you deploy by hand, nothing is copied, so copy any files that have changed.
 
@@ -249,6 +248,7 @@ There are no job priorities. A worker claims from the tab with the fewest runnin
 
 - `drive.google.com` and `docs.google.com`: 100, more than there are workers, so no limit, as their jobs use no cookies. Each is its own site rather than `google.com` (`OWN_SITES` in `utils/url.py`), so `www.google.com` (eg Search and Maps) still runs one at a time.
 - `instagram.com`: 2, so a long profile job doesn't hold back every post.
+- `youtube.com`: 3, as it uses no cookies, only a PO token.
 
 To change one, no deploy needed: `$Q "UPDATE site_limits SET max_running = 3 WHERE site = '<site>'"`, or `INSERT INTO site_limits` to add a site, and `DELETE` to put it back to one at a time.
 
@@ -295,26 +295,25 @@ For each VM, the script:
 
 The coordinator goes first. While it reboots, no jobs are claimed, and running jobs keep retrying their database writes for about 5 minutes, which is longer than a reboot takes. The script stops at the first step that fails, before it moves on to the next VM. It needs passwordless `sudo` for `apt-get`, as the deploys do for `systemctl`. It doesn't run `apt autoremove`, so old kernels build up in `/boot` over time.
 
-## Moving a spreadsheet from cron to the queue
+## Turning a spreadsheet on and off
 
-1. Register the spreadsheet if you haven't already (see [Installing a coordinator VM](#installing-a-coordinator-vm)).
-2. Turn off the spreadsheet's cron line, and wait for the current cron run to finish.
-3. Check that no row still says `Archive in progress`. Blank such a row to rerun it, or set it to a final status.
-4. Enable it. All its tabs move to the queue, and any tabs added later start enabled:
+A spreadsheet's config can stay deployed and registered with its tabs off (`sheets.enabled`), eg `AA Dave Testing`. Sync doesn't open a spreadsheet with every tab off, and a tab that's off is never read.
 
-   ```bash
-   poetry run python -m auto_archiver.job_queue.sync enable <spreadsheet_id>
-   ```
-
-   The id is in `sheets.spreadsheet_id`.
-
-To move a spreadsheet back to cron, leave the coordinator running and repeat the command below until it reports `Cron can go back on`. Only then re-enable the cron line:
+To turn one on (the id is in `sheets.spreadsheet_id`):
 
 ```bash
-poetry run python -m auto_archiver.job_queue.sync rollback <spreadsheet_id>
+poetry run python -m auto_archiver.job_queue.sync enable <spreadsheet_id>
 ```
 
-Each run turns the spreadsheet's tabs off and cancels any queued jobs, which clears their status. It then reports how many jobs are still running and how many sheet writes are still to be sent. Cron is only safe once both are zero.
+All its tabs are turned on, and any allowed tab added later starts on. Its rows are picked up within 5 minutes: at once if the coordinator hasn't read it since it started, otherwise when its tabs are next due. Every row with a URL and a blank status is queued, so check first that no row still says `Archive in progress` from an earlier run: blank it to rerun it, or set it to a final status.
+
+To turn one off:
+
+```bash
+poetry run python -m auto_archiver.job_queue.sync disable <spreadsheet_id>
+```
+
+It turns the spreadsheet's tabs off and cancels any queued jobs, which clears their status. Running jobs still finish and are written to the sheet; it reports how many are left, so run it again until it says `Nothing left to finish or write`.
 
 ## Stopping a worker
 
@@ -330,7 +329,7 @@ On the coordinator, `d` (or `poetry run python -m auto_archiver.job_queue.dashbo
 
 - the coordinator's heartbeat, CPU use, free disk, free memory and swap used; queue totals; jobs finished in the last hour and 24 hours, and how long the oldest queued job has waited; and the last backup;
 - each worker's heartbeat, code (red if it differs from the coordinator's, so it missed a deploy), CPU use, free disk, free memory, swap used, today's done and failed, and its running job with the time this attempt has run. Under the job is its stage and how long it has been in it: the extractor, enricher or formatter running, `storing: media 51 of 300`, or for an Instagram profile a running count such as `instagram_api_extractor: posts 430, 455 of 1000 limit` (stories, posts, tagged posts and highlights all count towards the profile's limit). The archiver saves its stage to `jobs.stage` as it goes, and each new attempt starts with none. Workers send their code, CPU, disk, memory and swap with each heartbeat;
-- each tab's queued, running, last 24 hours' done and failed, its rows, blank statuses and when sync last read it (red if a tab that's on hasn't been read for a minute);
+- each tab's queued, running, last 24 hours' done and failed, its rows, blank statuses and when sync last read it (red if a tab that's on hasn't been read for 8 minutes, as a quiet tab is read every 5);
 - queued jobs that can't be claimed yet, and why;
 - the 10 busiest sites in the last 24 hours, with done, failed, blocked and average time;
 - files and GB stored in the last 24 hours, and any job with files that couldn't be stored;
@@ -496,7 +495,8 @@ Never edit a file that has already been applied: its checksum is recorded. The c
 | Setting | Value | Defined in |
 |---|---|---|
 | Coordinator cycle (writer, cleanup) | 5 s | `coordinator.py` `CYCLE_SECONDS` |
-| Sheet sync interval | 15 s | `coordinator.py` `SYNC_SECONDS` |
+| Sheet sync pass | 15 s | `coordinator.py` `SYNC_SECONDS` |
+| Tabs read each pass | those with a job added in the last 7 days (active); the rest (quiet) every 5 min | `sync.py` `ACTIVE_DAYS`, `QUIET_TAB_SECONDS` |
 | Worker tick and heartbeat | 2 s | `worker_supervisor.py` `TICK_SECONDS` |
 | Worker reported as quiet after | 30 s without a heartbeat | `coordinator.py` `WORKER_QUIET_SECONDS` |
 | Lease length, and how often it's renewed | 5 min, renewed every 60 s | `db.py` `claim_job`, `worker_supervisor.py` `RENEW_SECONDS` |

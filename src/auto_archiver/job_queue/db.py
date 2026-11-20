@@ -141,8 +141,8 @@ def save_tab(
     spreadsheet_name: str = "",
 ) -> None:
     """
-    Adds a tab, off so cron keeps it until it's moved. A tab added to a spreadsheet already on the queue starts on,
-    as cron no longer reads that spreadsheet. A known tab only gets its current title, and its config when registering:
+    Adds a tab, off until the spreadsheet is enabled. A tab added to a spreadsheet with a tab on starts on, so a new
+    allowed tab is read without a command. A known tab only gets its current title, and its config when registering:
     sync can't change it, or a tab allowed by two configs would swap between them every cycle
     """
     conn.execute(
@@ -193,14 +193,15 @@ def remove_unused_tab(conn: psycopg.Connection, sheet_id: int) -> bool:
 
 
 def enable_spreadsheet(conn: psycopg.Connection, spreadsheet_id: str) -> int:
-    """Moves all of a spreadsheet's tabs to the queue. Returns how many tabs it has"""
+    """Turns on all of a spreadsheet's tabs, so sync reads them. Returns how many tabs it has"""
     return conn.execute("UPDATE sheets SET enabled = true WHERE spreadsheet_id = %s", (spreadsheet_id,)).rowcount
 
 
-def rollback_spreadsheet(conn: psycopg.Connection, spreadsheet_id: str) -> tuple[int, int, int]:
+def disable_spreadsheet(conn: psycopg.Connection, spreadsheet_id: str) -> tuple[int, int, int]:
     """
-    Takes a spreadsheet off the queue: turns it off, then cancels its waiting jobs, which clears their status. Safe to
-    run again. Returns (cancelled, still running, sheet writes still to do): cron stays off until the last two are 0
+    Turns off all of a spreadsheet's tabs, so sync stops reading them, then cancels their waiting jobs, which clears
+    their status. Its config stays registered, so `enable` turns it back on. Safe to run again. Returns (cancelled,
+    still running, sheet writes still to do): running jobs still finish and are written to the sheet
     """
     conn.execute("UPDATE sheets SET enabled = false WHERE spreadsheet_id = %s", (spreadsheet_id,))
     queued = conn.execute(
@@ -230,6 +231,14 @@ def rollback_spreadsheet(conn: psycopg.Connection, spreadsheet_id: str) -> tuple
 
 def get_sheets(conn: psycopg.Connection) -> list[dict]:
     return conn.execute("SELECT * FROM sheets ORDER BY id").fetchall()
+
+
+def get_recently_active_sheet_ids(conn: psycopg.Connection, days: int) -> set[int]:
+    """Tabs with a job created in the last days, eg a new row or a cleared status"""
+    rows = conn.execute(
+        "SELECT DISTINCT sheet_id FROM jobs WHERE added_at > now() - make_interval(days => %s)", (days,)
+    ).fetchall()
+    return {row["sheet_id"] for row in rows}
 
 
 def get_queue_summary(conn: psycopg.Connection) -> dict:
