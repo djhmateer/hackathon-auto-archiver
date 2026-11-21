@@ -176,9 +176,14 @@ def save_tab(
 def save_tab_read(conn: psycopg.Connection, sheet_id: int, url_rows: int, blank_rows: int) -> None:
     """What sync found in the tab just now, for the dashboard"""
     conn.execute(
-        "UPDATE sheets SET last_read_at = now(), url_rows = %s, blank_rows = %s WHERE id = %s",
+        "UPDATE sheets SET last_read_at = now(), url_rows = %s, blank_rows = %s, read_error = NULL WHERE id = %s",
         (url_rows, blank_rows, sheet_id),
     )
+
+
+def save_tab_error(conn: psycopg.Connection, sheet_id: int, error: str) -> None:
+    """Why sync couldn't read the tab, for the dashboard. The next good read clears it"""
+    conn.execute("UPDATE sheets SET read_error = %s WHERE id = %s", (error, sheet_id))
 
 
 def remove_unused_tab(conn: psycopg.Connection, sheet_id: int) -> bool:

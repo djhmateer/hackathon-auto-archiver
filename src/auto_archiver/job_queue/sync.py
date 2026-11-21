@@ -193,13 +193,15 @@ def _values(value_range: dict) -> list[list[str]]:
     return value_range.get("values", [])
 
 
-def read_tabs(spreadsheet, tabs: list, settings: dict) -> dict[int, list[Row]]:
+def read_tabs(spreadsheet, tabs: list, settings: dict) -> tuple[dict[int, list[Row]], dict[int, str]]:
     """
     Reads only the columns sync needs, in two batched calls however many tabs there are: the headers, then the columns.
-    Returns the rows by tab gid. A tab without the url and status columns is left out, as in the feeder
+    Returns the rows by tab gid, and why each tab left out was, by gid. A tab without the url and status columns is
+    left out, as in the feeder
     """
+    errors = {}
     if not tabs:
-        return {}
+        return {}, errors
     header, columns = settings["header"], settings["columns"]
     headers = spreadsheet.values_batch_get(
         [gspread_utils.absolute_range_name(tab.title, f"{header}:{header}") for tab in tabs]
@@ -214,6 +216,8 @@ def read_tabs(spreadsheet, tabs: list, settings: dict) -> dict[int, list[Row]]:
             if col in columns and columns[col].lower() in names
         }
         if "url" not in positions or "status" not in positions:
+            absent = [f"'{columns[col]}'" for col in ("url", "status") if col not in positions]
+            errors[tab.id] = f"no {' or '.join(absent)} column in row {header}, so it isn't read"
             # none of them is just a helper tab, but only one probably means a renamed or deleted header
             if ("url" in positions) != ("status" in positions):
                 logger.warning(
@@ -238,7 +242,7 @@ def read_tabs(spreadsheet, tabs: list, settings: dict) -> dict[int, list[Row]]:
             # from the header row, as a range starting below the last row of a tab is an error
             ranges.append(gspread_utils.absolute_range_name(tab.title, f"{letter}{header}:{letter}"))
     if not ranges:
-        return {}
+        return {}, errors
 
     results = iter(spreadsheet.values_batch_get(ranges)["valueRanges"])
     rows_by_tab = {}
@@ -256,7 +260,7 @@ def read_tabs(spreadsheet, tabs: list, settings: dict) -> dict[int, list[Row]]:
         for index in range(len(cells["url"])):
             if url := cell("url", index).strip():
                 rows_by_tab[tab.id].append(Row(header + 1 + index, url, cell("status", index), cell("folder", index)))
-    return rows_by_tab
+    return rows_by_tab, errors
 
 
 def register(conn, config_path: str, opener=open_spreadsheet) -> int:
@@ -366,8 +370,10 @@ def sync_cycle(conn, opener=open_spreadsheet, after_each=None) -> None:
             }
             # a tab new this pass has never been read, so is due and its rows are queued straight away
             tabs = [tab for tab in tabs if tab.id in sheets and is_due(sheets[tab.id], active)]
-            rows_by_tab = read_tabs(spreadsheet, tabs, settings)
+            rows_by_tab, errors = read_tabs(spreadsheet, tabs, settings)
             read = time.monotonic()
+            for gid, error in errors.items():
+                db.save_tab_error(conn, sheets[gid]["id"], error)
             for gid, rows in rows_by_tab.items():
                 sheet = sheets[gid]
                 title, name = sheet["worksheet"], settings["sheet"] or spreadsheet.title

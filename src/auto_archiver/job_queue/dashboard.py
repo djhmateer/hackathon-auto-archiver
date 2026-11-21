@@ -259,7 +259,7 @@ def sheets(conn, pool: str = None) -> list[str]:
     rows = conn.execute(
         f"""
         SELECT s.spreadsheet_name, s.worksheet, s.enabled, s.paused_until > now() AS paused, s.paused_until, o.pool,
-            s.url_rows, s.blank_rows, extract(epoch FROM now() - s.last_read_at)::int AS read_seconds_ago,
+            s.url_rows, s.blank_rows, s.read_error, extract(epoch FROM now() - s.last_read_at)::int AS read_seconds_ago,
             count(j.id) FILTER (WHERE j.status = 'queued') AS queued,
             count(j.id) FILTER (WHERE j.status = 'running') AS running,
             count(j.id) FILTER (WHERE j.status = 'done' AND j.finished_at > now() - interval '1 day') AS done,
@@ -299,6 +299,9 @@ def sheets(conn, pool: str = None) -> list[str]:
             f" {url_rows:>6} {blank_rows:>6}"
             f"   {read} {state}"
         )
+        # only an enabled tab is read, so an old error on one that's off is left dim
+        if row["read_error"]:
+            lines.append(colour(RED if row["enabled"] else DIM, f"    {row['read_error']}"))
     return lines
 
 

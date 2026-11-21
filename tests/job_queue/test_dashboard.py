@@ -337,6 +337,13 @@ def test_sheets_show_what_sync_last_read(conn):
     assert dashboard.DIM + "never" in lines[3]
 
 
+def test_a_tab_sync_couldnt_read_shows_why(conn):
+    sheet_id = add_sheet(conn)
+    db.save_tab_error(conn, sheet_id, "no 'archive status' column in row 1, so it isn't read")
+    lines = dashboard.sheets(conn)[2:]
+    assert RED + "    no 'archive status' column in row 1, so it isn't read" in lines[1]
+
+
 GB = dashboard.GB
 STATS = {
     "cpu_percent": 12.3,

@@ -414,6 +414,22 @@ class TestInstagramAPIExtractor(TestExtractorBase):
 
         mock_get.assert_called_once()
 
+    @pytest.mark.parametrize("status, calls", [(403, 1), (400, 1), (429, 5), (502, 5)])
+    def test_call_api_retries_only_429_and_5xx(self, mocker, status, calls):
+        mocker.patch("time.sleep")
+        response = requests.Response()
+        response.status_code = status
+        response._content = b'{"detail": "the reason"}'
+        mock_get = mocker.patch(
+            "auto_archiver.modules.instagram_api_extractor.instagram_api_extractor.requests.get", return_value=response
+        )
+
+        with pytest.raises(requests.HTTPError, match="the reason") as e:
+            self.extractor.call_api("g2/user/medias", {"user_id": "123"})
+
+        assert e.value.response.status_code == status
+        assert mock_get.call_count == calls
+
     def test_skipped_profile_posts_are_noted_and_counter_resets(self, mocker):
         """Posts skipped during a full profile download are counted in the status note, per download() call"""
         self.extractor.full_profile = True

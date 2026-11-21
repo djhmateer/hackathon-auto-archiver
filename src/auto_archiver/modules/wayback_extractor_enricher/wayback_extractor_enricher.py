@@ -91,7 +91,8 @@ class WaybackExtractorEnricher(Enricher, Extractor):
             error_content = str(error_content)[:200]
             em = f"Internet archive failed with status of {r.status_code}: {error_content}"
             # DM 19th Nov 26 - a 503 is IA "Temporarily Offline", their outage not ours, so not an error
-            if r.status_code == 503:
+            # DM 21st Nov 26 - nor is a 429, eg too many Save Page Now sessions open at once on the account
+            if r.status_code in (429, 503):
                 logger.warning(em)
             else:
                 logger.error(em)

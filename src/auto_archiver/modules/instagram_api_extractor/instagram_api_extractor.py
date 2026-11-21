@@ -34,6 +34,14 @@ def _log_failure(message: str, e: Exception):
         logger.error(f"{message}: {e} {traceback.format_exc()}")
 
 
+# DM 21st Nov 26 - like a 404, a 403 didn't recover on retry (one profile's stories, posts and highlights, about 8.5
+# minutes in all), so only connection errors, timeouts, 429 and 5xx are retried - any other 4xx is about the content
+def _worth_retrying(e: Exception) -> bool:
+    if isinstance(e, requests.HTTPError):
+        return e.response.status_code == 429 or e.response.status_code >= 500
+    return True
+
+
 class InstagramAPIExtractor(Extractor):
     """
     Uses an https://github.com/subzeroid/instagrapi API deployment to fetch instagram posts data
@@ -135,7 +143,7 @@ class InstagramAPIExtractor(Extractor):
     #  8s → 16s → 32s → 60s → 60s
     # DM 30th Oct 26 - a 404 didn't recover on retry and cost about 3 minutes each time
     @retry(
-        retry_on_exception=lambda e: not (isinstance(e, requests.HTTPError) and e.response.status_code == 404),
+        retry_on_exception=_worth_retrying,
         wait_exponential_multiplier=8000,
         wait_exponential_max=60000,
         stop_max_attempt_number=5,
@@ -144,7 +152,12 @@ class InstagramAPIExtractor(Extractor):
         headers = {"accept": "application/json", "x-access-key": self.access_token}
         logger.debug(f"Calling {self.api_endpoint}/{path} with {params=}")
         response = requests.get(f"{self.api_endpoint}/{path}", headers=headers, params=params, timeout=60)
-        response.raise_for_status()
+        if not response.ok:
+            # the start of the body says why, eg a 403's reason
+            raise requests.HTTPError(
+                f"{response.status_code} {response.reason} for url: {response.url} - {response.text[:200]}",
+                response=response,
+            )
         return response.json()
 
     def cleanup_dict(self, d: dict | list) -> dict:

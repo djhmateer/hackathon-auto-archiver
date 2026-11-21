@@ -278,6 +278,21 @@ def test_saves_what_it_read_for_the_dashboard(conn, config):
     assert tab["last_read_at"] is not None
 
 
+def test_a_tab_missing_its_status_column_has_an_error_until_its_fixed(conn, config):
+    tab = tab_of(["https://example.com/1"], headers=["Link"])
+    sheet = FakeSpreadsheet([tab])
+    setup_sheet(conn, sheet)
+    run(conn, sheet)
+    saved = conn.execute("SELECT read_error, last_read_at FROM sheets").fetchone()
+    assert saved["read_error"] == "no 'archive status' column in row 1, so it isn't read"
+    assert saved["last_read_at"] is None
+
+    tab.rows[0] = HEADERS
+    sync._last_read.clear()
+    run(conn, sheet)
+    assert conn.execute("SELECT read_error FROM sheets").fetchone()["read_error"] is None
+
+
 def test_a_slow_spreadsheet_is_logged_with_where_the_time_went(conn, config, caplog, monkeypatch):
     sheet = FakeSpreadsheet([tab_of(row("https://example.com/1"))])
     setup_sheet(conn, sheet)

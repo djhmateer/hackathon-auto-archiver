@@ -115,6 +115,16 @@ def test_enrich_post_503_is_a_warning_not_an_error(
     assert [r.levelname for r in caplog.records if "Internet archive failed" in r.message] == ["WARNING"]
 
 
+def test_enrich_post_429_is_a_warning_not_an_error(
+    wayback_extractor_enricher, metadata, mock_is_auth_wall, mock_post_success, caplog
+):
+    mock_is_auth_wall(False)
+    mock_post_success(json_data={"status": "error", "status_ext": "error:user-session-limit"}, status_code=429)
+
+    assert wayback_extractor_enricher.enrich(metadata) is False
+    assert [r.levelname for r in caplog.records if "Internet archive failed" in r.message] == ["WARNING"]
+
+
 def test_enrich_post_json_decode_error(wayback_extractor_enricher, metadata, mock_is_auth_wall, mocker):
     mock_is_auth_wall(False)
     resp = mocker.Mock(status_code=200)
