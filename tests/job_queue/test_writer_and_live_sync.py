@@ -320,6 +320,28 @@ def test_reads_only_the_cells_it_needs(conn, sheet_id, sheet, tab):
     assert sheet.ranges_read == ["'Tab 1'!1:1", "'Tab 1'!A2", "'Tab 1'!B2"]
 
 
+def test_a_big_backlog_is_read_in_several_small_reads(conn, sheet_id, sheet, tab, monkeypatch):
+    monkeypatch.setattr(writer, "MAX_RANGES_PER_READ", 3)
+    tab.rows += [row(url=f"https://example.com/post/{n}") for n in (3, 4, 5)]
+    run_sync(conn, sheet)
+    sheet.batch_calls = 0
+    assert run_writer(conn, sheet) == 4
+    # the header, then 8 cells (url and status of 4 rows) in reads of at most 3
+    assert sheet.batch_calls == 1 + 3
+    assert [cell(tab, f"B{n}") for n in (2, 3, 4, 5)] == ["Queued"] * 4
+
+
+def test_a_big_backlog_is_written_a_few_rows_per_cycle_oldest_first(conn, sheet_id, sheet, tab, monkeypatch):
+    monkeypatch.setattr(writer, "MAX_ENTRIES_PER_TAB", 3)
+    tab.rows += [row(url=f"https://example.com/post/{n}") for n in (3, 4, 5)]
+    run_sync(conn, sheet)
+    assert run_writer(conn, sheet) == 3
+    assert [cell(tab, f"B{n}") for n in (2, 3, 4, 5)] == ["Queued", "Queued", "Queued", ""]
+    assert run_writer(conn, sheet) == 1
+    assert cell(tab, "B5") == "Queued"
+    assert run_writer(conn, sheet) == 0
+
+
 def test_renamed_tab_still_gets_its_results(conn, config, sheet_id, sheet, tab):
     config(allow_worksheets="['Tab 1']")
     add_entry_job(conn, sheet_id)

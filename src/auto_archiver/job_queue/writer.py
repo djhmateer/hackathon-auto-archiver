@@ -23,6 +23,12 @@ READ_WRITE_SCOPES = ["https://www.googleapis.com/auth/spreadsheets", "https://ww
 WRITER_INTERVAL_SECONDS = 30
 # Sheets' limit for a cell
 MAX_CELL_LENGTH = 49999
+# a batch read is a GET with every range in the URL, and Google answers 413 once that gets too long
+# (300 rows of about 12 cells did). 100 ranges keeps it to a few KB, even with a long tab name
+MAX_RANGES_PER_READ = 100
+# a tab's oldest entries each cycle, and the rest wait for the next. Keeps each write a size that's been seen to
+# work, and the gap between checking a row's URL and writing to it short
+MAX_ENTRIES_PER_TAB = 50
 
 
 def open_for_writing(settings: dict, spreadsheet_id: str = None):
@@ -59,7 +65,7 @@ def _discard(conn, entry: dict, spreadsheet_name: str, tab_title: str, reason: s
 
 
 def _write_tab(conn, tab, entries: list[dict], settings: dict, read_ranges, spreadsheet_name: str) -> int:
-    """Checks then writes one tab's entries, with one read for the headers, one for the rows and one write"""
+    """Checks then writes one tab's entries, with one read for the headers, a few for the rows and one write"""
     header, columns = settings["header"], settings["columns"]
     names = [str(name).lower() for name in (read_ranges([f"{header}:{header}"], tab)[0].get("values") or [[]])[0]]
     positions = {col: names.index(name.lower()) + 1 for col, name in columns.items() if name.lower() in names}
@@ -123,7 +129,10 @@ def _write_spreadsheet(conn, spreadsheet_id: str, config_path: str, entries: lis
 
     def read_ranges(ranges, tab):
         full = [gspread_utils.absolute_range_name(tab.title, r) for r in ranges]
-        return spreadsheet.values_batch_get(full)["valueRanges"]
+        value_ranges = []
+        for start in range(0, len(full), MAX_RANGES_PER_READ):
+            value_ranges += spreadsheet.values_batch_get(full[start : start + MAX_RANGES_PER_READ])["valueRanges"]
+        return value_ranges
 
     by_tab = {}
     for entry in entries:
@@ -135,7 +144,9 @@ def _write_spreadsheet(conn, spreadsheet_id: str, config_path: str, entries: lis
             for entry in tab_entries:
                 _discard(conn, entry, spreadsheet.title, str(gid), "the tab has been deleted")
             continue
-        written += _write_tab(conn, tabs[gid], tab_entries, settings, read_ranges, spreadsheet.title)
+        written += _write_tab(
+            conn, tabs[gid], tab_entries[:MAX_ENTRIES_PER_TAB], settings, read_ranges, spreadsheet.title
+        )
     return written
 
 
