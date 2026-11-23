@@ -41,7 +41,7 @@ dependencies = [
     "instaloader (>=0.0.0)",
     "tqdm (>=0.0.0)",
     "jinja2 (>=0.0.0)",
-    "boto3 (>=1.28.0,<2.0.0)",
+    "boto3 (>=1.44.10,<2.0.0)",
     "dataclasses-json (>=0.0.0)",
     "numpy (==2.1.3)",
     "requests[socks] (>=0.0.0)",
@@ -81,13 +81,13 @@ pytest = "^8.3.4"
 autopep8 = "^2.3.1"
 pytest-loguru = "^0.4.0"
 pytest-mock = "^3.14.0"
-ruff = "^0.15.2"
+ruff = "^0.17.6"
 pre-commit = "^4.1.0"
 
 [tool.poetry.group.docs.dependencies]
 #sphinx = "^8.1.3"
 #sphinx-autoapi = "^3.4.0"
-sphinxcontrib-mermaid = "^1.0.0"
+sphinxcontrib-mermaid = "^2.1.1"
 sphinx-autobuild = "^2024.10.3"
 sphinx-copybutton = "^0.5.2"
 myst-parser = "^4.0.0"
