@@ -58,7 +58,16 @@ class GDriveFolderExtractor(Extractor):
             return False
 
         started = time.monotonic()
-        root = self._get(match.group(1))
+        try:
+            root = self._get(match.group(1))
+        except HttpError as e:
+            if e.resp.status != 404:
+                raise
+            # private, deleted or not shared with the service account: nothing else can archive it either
+            logger.warning(f"Drive folder {match.group(1)} not found or private: {e}")
+            item.add_status_note("Drive folder not found or private (HTTP 404)")
+            item.set_context("stop_archiving", True)
+            return False
         logger.info(f"Walking Drive folder '{root['name']}' ({root['id']})")
         result = Metadata()
         result.set_title(root["name"])

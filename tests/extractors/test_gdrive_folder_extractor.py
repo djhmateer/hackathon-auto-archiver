@@ -20,6 +20,8 @@ class FakeRequest:
         self.value = value
 
     def execute(self, num_retries=0):
+        if isinstance(self.value, Exception):
+            raise self.value
         return self.value
 
 
@@ -260,3 +262,17 @@ def test_stops_before_going_over_max_bytes(make_extractor):
 
 def test_ignores_other_urls(make_extractor):
     assert make_extractor({}, {}).download(item("https://drive.google.com/file/d/abc/view")) is False
+
+
+def test_private_or_missing_folder_stops_archiving(make_extractor):
+    the_item = item()
+
+    assert make_extractor({"root1": http_error(404)}, {}).download(the_item) is False
+
+    assert the_item.get_status_notes() == ["Drive folder not found or private (HTTP 404)"]
+    assert the_item.get_context("stop_archiving") is True
+
+
+def test_other_folder_errors_still_raise(make_extractor):
+    with pytest.raises(HttpError):
+        make_extractor({"root1": http_error(500)}, {}).download(item())
