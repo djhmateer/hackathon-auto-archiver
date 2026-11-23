@@ -249,6 +249,7 @@ There are no job priorities. A worker claims from the tab with the fewest runnin
 - `drive.google.com` and `docs.google.com`: 100, more than there are workers, so no limit, as their jobs use no cookies. Each is its own site rather than `google.com` (`OWN_SITES` in `utils/url.py`), so `www.google.com` (eg Search and Maps) still runs one at a time.
 - `instagram.com`: 2, so a long profile job doesn't hold back every post.
 - `youtube.com`: 3, as it uses no cookies, only a PO token.
+- `t.me`: 2. Every worker uses the same Telegram session, which is only safe while they all go out through the same IP, as Telegram revokes a session used from two IPs at once.
 
 To change one, no deploy needed: `$Q "UPDATE site_limits SET max_running = 3 WHERE site = '<site>'"`, or `INSERT INTO site_limits` to add a site, and `DELETE` to put it back to one at a time.
 
