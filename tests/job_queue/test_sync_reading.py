@@ -1,5 +1,6 @@
 """How sync reads sheets, against real Postgres and a fake spreadsheet that answers range reads like the Sheets API"""
 
+import gspread
 import pytest
 from job_queue_fakes import FakeSpreadsheet, FakeTab, opener_for
 
@@ -228,6 +229,31 @@ def test_google_connection_is_read_only(mocker):
     sync.open_spreadsheet({"service_account": "account.json", "sheet_id": "spreadsheet1", "sheet": None})
     scopes = connect.call_args.kwargs["scopes"]
     assert scopes and all(scope.endswith(".readonly") for scope in scopes)
+
+
+def test_opening_a_spreadsheet_fetches_only_the_metadata_sync_needs(mocker):
+    # the full metadata (each tab's merges, formats etc) was 42 MB for one spreadsheet
+    class FakeHTTPClient(gspread.http_client.HTTPClient):
+        def __init__(self):
+            self.params = []
+
+        def fetch_sheet_metadata(self, id, params=None):
+            self.params.append(params)
+            tab = {"sheetId": 7, "title": "Tab 1", "index": 0, "gridProperties": {"rowCount": 10, "columnCount": 5}}
+            return {"properties": {"title": "Example Sheet"}, "sheets": [{"properties": tab}]}
+
+    http_client = FakeHTTPClient()
+    mocker.patch("auto_archiver.job_queue.sync.gspread.service_account").return_value.http_client = http_client
+
+    spreadsheet = sync.open_spreadsheet({"service_account": "account.json", "sheet_id": "spreadsheet1", "sheet": None})
+    (tab,) = spreadsheet.worksheets()
+
+    assert http_client.params == [sync.METADATA_PARAMS, sync.METADATA_PARAMS], "on opening, and in worksheets()"
+    assert (spreadsheet.id, spreadsheet.title) == ("spreadsheet1", "Example Sheet")
+    assert (tab.id, tab.title, tab.row_count) == (7, "Tab 1", 10)
+
+    spreadsheet.fetch_sheet_metadata(params={"fields": "namedRanges"})  # eg gspread's list_named_ranges()
+    assert http_client.params[-1] == {"fields": "namedRanges"}, "a call asking for particular fields still gets them"
 
 
 def test_columns_found_are_logged_once(conn, config, caplog):

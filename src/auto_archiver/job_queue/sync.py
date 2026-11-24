@@ -31,6 +31,8 @@ READ_ONLY_SCOPES = [
     "https://www.googleapis.com/auth/drive.readonly",
 ]
 SHEETS_TIMEOUT_SECONDS = 60
+# all sync and the writer need from a spreadsheet's metadata (see SlimSpreadsheet)
+METADATA_PARAMS = {"includeGridData": "false", "fields": "properties,sheets.properties"}
 SYNC_INTERVAL_SECONDS = 60
 SLOW_SPREADSHEET_SECONDS = 5  # a spreadsheet whose sync takes longer is logged with where the time went
 # DM 20th Nov 26 - a pass over every tab took ~50s, so new rows waited up to a minute. Now a tab with a job created in
@@ -169,13 +171,26 @@ def load_settings(config_path: str) -> dict:
     }
 
 
+class SlimSpreadsheet(gspread.Spreadsheet):
+    """
+    gspread's, but its metadata calls that ask for no particular fields (on opening, worksheets(), worksheet() etc.)
+    fetch only the spreadsheet's and its tabs' properties: title, ids, row counts, which is all those use. The full
+    metadata adds every tab's merges, conditional formats etc.
+    DM 24th Nov 26 - that was 42 MB for one spreadsheet, taking ~4s, twice per sync of it and per write batch
+    """
+
+    def fetch_sheet_metadata(self, params=None):
+        return super().fetch_sheet_metadata(params or METADATA_PARAMS)
+
+
 def open_spreadsheet(
     settings: dict, spreadsheet_id: str = None, scopes: list[str] = READ_ONLY_SCOPES
 ) -> gspread.Spreadsheet:
     client = gspread.service_account(filename=settings["service_account"], scopes=scopes)
     client.set_timeout(SHEETS_TIMEOUT_SECONDS)
     if spreadsheet_id or settings["sheet_id"]:
-        return client.open_by_key(spreadsheet_id or settings["sheet_id"])
+        # as client.open_by_key() does, but with the smaller metadata
+        return SlimSpreadsheet(client.http_client, {"id": spreadsheet_id or settings["sheet_id"]})
     return client.open(settings["sheet"])
 
 
