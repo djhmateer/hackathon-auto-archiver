@@ -174,11 +174,13 @@ def save_tab(
 
 
 def save_tab_read(conn: psycopg.Connection, sheet_id: int, url_rows: int, blank_rows: int) -> None:
-    """What sync found in the tab just now, for the dashboard"""
+    """What sync found in the tab just now, for the dashboard, and when, keeping the last hour of reads"""
     conn.execute(
         "UPDATE sheets SET last_read_at = now(), url_rows = %s, blank_rows = %s, read_error = NULL WHERE id = %s",
         (url_rows, blank_rows, sheet_id),
     )
+    conn.execute("INSERT INTO sheet_reads (sheet_id) VALUES (%s)", (sheet_id,))
+    conn.execute("DELETE FROM sheet_reads WHERE sheet_id = %s AND read_at < now() - interval '1 hour'", (sheet_id,))
 
 
 def save_tab_error(conn: psycopg.Connection, sheet_id: int, error: str) -> None:

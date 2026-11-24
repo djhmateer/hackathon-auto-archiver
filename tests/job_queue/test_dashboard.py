@@ -337,6 +337,46 @@ def test_sheets_show_what_sync_last_read(conn):
     assert dashboard.DIM + "never" in lines[3]
 
 
+def read_at(conn, sheet_id, *minutes_ago) -> None:
+    for minutes in minutes_ago:
+        conn.execute(
+            "INSERT INTO sheet_reads (sheet_id, read_at) VALUES (%s, now() - make_interval(mins => %s))",
+            (sheet_id, minutes),
+        )
+
+
+def test_a_read_is_kept_for_an_hour(conn):
+    sheet_id = add_sheet(conn)
+    read_at(conn, sheet_id, 61, 59)
+    db.save_tab_read(conn, sheet_id, 10, 0)
+    kept = conn.execute("SELECT count(*) AS n FROM sheet_reads WHERE sheet_id = %s", (sheet_id,)).fetchone()["n"]
+    assert kept == 2, "the one 59 minutes ago and this one"
+
+
+def test_sheets_show_how_often_a_tab_is_read_and_its_slowest_gap(conn):
+    active = add_sheet(conn, gid=1)
+    quiet = add_sheet(conn, gid=2)
+    add_sheet(conn, gid=3, enabled=False)
+    add_job(conn, active, 2, "site1.com")  # a job in the last ACTIVE_DAYS makes it active
+    # a 5m gap ending 25 minutes ago is too old; then 15m, 1m, and the 9m since
+    read_at(conn, active, 30, 25, 10, 9)
+    conn.execute("UPDATE sheets SET last_read_at = now() - interval '9 minutes' WHERE id = %s", (active,))
+    db.save_tab_read(conn, quiet, 10, 0)
+
+    lines = dashboard.sheets(conn)[2:]
+    assert "active 15m" in lines[0]
+    assert "quiet  0s" in lines[1], "read once, just now"
+    assert "active" not in lines[2] and "quiet" not in lines[2], "a tab that's off isn't read"
+
+
+def test_a_tab_sync_has_stopped_reading_shows_the_time_since_its_last_read(conn):
+    sheet_id = add_sheet(conn)
+    add_job(conn, sheet_id, 2, "site1.com")
+    read_at(conn, sheet_id, 4, 3)  # a 1m gap, then nothing for 3m
+    conn.execute("UPDATE sheets SET last_read_at = now() - interval '3 minutes' WHERE id = %s", (sheet_id,))
+    assert "active 3m" in dashboard.sheets(conn)[2]
+
+
 def test_a_tab_sync_couldnt_read_shows_why(conn):
     sheet_id = add_sheet(conn)
     db.save_tab_error(conn, sheet_id, "no 'archive status' column in row 1, so it isn't read")
