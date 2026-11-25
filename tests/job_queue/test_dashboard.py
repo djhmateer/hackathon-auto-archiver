@@ -353,19 +353,19 @@ def test_a_read_is_kept_for_an_hour(conn):
     assert kept == 2, "the one 59 minutes ago and this one"
 
 
-def test_sheets_show_how_often_a_tab_is_read_and_its_slowest_gap(conn):
+def test_sheets_show_how_often_a_tab_is_read_and_its_typical_and_slowest_gaps(conn):
     active = add_sheet(conn, gid=1)
     quiet = add_sheet(conn, gid=2)
     add_sheet(conn, gid=3, enabled=False)
     add_job(conn, active, 2, "site1.com")  # a job in the last ACTIVE_DAYS makes it active
-    # a 5m gap ending 25 minutes ago is too old; then 15m, 1m, and the 9m since
-    read_at(conn, active, 30, 25, 10, 9)
-    conn.execute("UPDATE sheets SET last_read_at = now() - interval '9 minutes' WHERE id = %s", (active,))
+    # a 5m gap ending 25 minutes ago is too old; then 15m, 1m, 1m, and the 8m since
+    read_at(conn, active, 30, 25, 10, 9, 8)
+    conn.execute("UPDATE sheets SET last_read_at = now() - interval '8 minutes' WHERE id = %s", (active,))
     db.save_tab_read(conn, quiet, 10, 0)
 
     lines = dashboard.sheets(conn)[2:]
-    assert "active 15m" in lines[0]
-    assert "quiet  0s" in lines[1], "read once, just now"
+    assert "active 1m      15m" in lines[0]
+    assert "quiet          0s" in lines[1], "read once, just now, so no gap yet"
     assert "active" not in lines[2] and "quiet" not in lines[2], "a tab that's off isn't read"
 
 
@@ -374,7 +374,7 @@ def test_a_tab_sync_has_stopped_reading_shows_the_time_since_its_last_read(conn)
     add_job(conn, sheet_id, 2, "site1.com")
     read_at(conn, sheet_id, 4, 3)  # a 1m gap, then nothing for 3m
     conn.execute("UPDATE sheets SET last_read_at = now() - interval '3 minutes' WHERE id = %s", (sheet_id,))
-    assert "active 3m" in dashboard.sheets(conn)[2]
+    assert "active 1m      3m" in dashboard.sheets(conn)[2]
 
 
 def test_a_tab_sync_couldnt_read_shows_why(conn):

@@ -1,5 +1,7 @@
 """How sync reads sheets, against real Postgres and a fake spreadsheet that answers range reads like the Sheets API"""
 
+from unittest.mock import Mock
+
 import gspread
 import pytest
 from job_queue_fakes import FakeSpreadsheet, FakeTab, opener_for
@@ -417,3 +419,52 @@ def test_quiet_tab_whose_read_failed_is_read_again_next_pass(conn, config, quiet
 
     run(conn, sheet)
     assert sheet.batch_calls == 2
+
+
+class FakeSession:
+    """Answers a Sheets API call after `seconds` on a fake clock, or raises `error`"""
+
+    def __init__(self, clock, seconds=0.0, error=None):
+        self.clock, self.seconds, self.error = clock, seconds, error
+
+    def request(self, **kwargs):
+        self.clock[0] += self.seconds
+        if self.error:
+            raise self.error
+        return Mock(ok=True, content=b"x" * 2048)
+
+
+@pytest.fixture
+def clock(mocker):
+    now = [100.0]
+    mocker.patch("auto_archiver.job_queue.sync.time.monotonic", side_effect=lambda: now[0])
+    return now
+
+
+ENDPOINT = "https://sheets.example.com/v4/spreadsheets/spreadsheet1/values:batchGet"
+
+
+def test_a_slow_sheets_call_is_logged_with_how_long_it_took(mocker, clock):
+    logger = mocker.patch("auto_archiver.job_queue.sync.logger")
+    sync.TimedHTTPClient(None, session=FakeSession(clock, seconds=sync.SLOW_REQUEST_SECONDS - 1)).request(
+        "get", ENDPOINT
+    )
+    logger.info.assert_not_called()
+    sync.TimedHTTPClient(None, session=FakeSession(clock, seconds=12.5)).request("get", ENDPOINT)
+    logger.info.assert_called_once_with("Google API GET /v4/spreadsheets/spreadsheet1/values:batchGet took 12.5s, 2 KB")
+
+
+def test_a_failed_sheets_call_is_logged_with_how_long_it_took(mocker, clock):
+    logger = mocker.patch("auto_archiver.job_queue.sync.logger")
+    client = sync.TimedHTTPClient(None, session=FakeSession(clock, seconds=60, error=TimeoutError("read timed out")))
+    with pytest.raises(TimeoutError):
+        client.request("get", ENDPOINT)
+    logger.info.assert_called_once_with(
+        "Google API GET /v4/spreadsheets/spreadsheet1/values:batchGet failed after 60.0s: TimeoutError"
+    )
+
+
+def test_sync_and_the_writer_time_their_sheets_calls(mocker):
+    connect = mocker.patch("auto_archiver.job_queue.sync.gspread.service_account")
+    sync.open_spreadsheet({"service_account": "account.json", "sheet_id": "spreadsheet1", "sheet": None})
+    assert connect.call_args.kwargs["http_client"] is sync.TimedHTTPClient

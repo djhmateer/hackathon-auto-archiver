@@ -35,7 +35,7 @@ SITES = 10
 # a quiet tab is due every QUIET_TAB_SECONDS, but read only when a pass starts, and after the spreadsheets before it
 # in that pass (~50s when all the quiet tabs are due together), so allow for both
 READ_LATE_SECONDS = QUIET_TAB_SECONDS + 3 * 60
-READ_GAP_MINUTES = 20  # the slowest gap between a tab's reads over this long (sheet_reads keeps an hour)
+READ_GAP_MINUTES = 20  # the typical and slowest gaps between a tab's reads over this long (sheet_reads keeps an hour)
 QUEUED_LONG_SECONDS = 60 * 60
 WORKER_WIDTH = 12  # eg glanworker1
 POOL_WIDTH = 5  # eg glan
@@ -249,30 +249,36 @@ def sheets(conn, pool: str = None) -> list[str]:
             DIM,
             "   done and failed are for the last 24h; rows have a URL, blank of them have no status; "
             f"active tabs are read every {SYNC_SECONDS}s, quiet ones every {ago(QUIET_TAB_SECONDS)}, red if not for {ago(READ_LATE_SECONDS)}; "
-            f"slowest is the longest gap between reads that ended in the last {READ_GAP_MINUTES}m, or since the last read",
+            f"typical and slowest are the median and longest gaps between reads that ended in the last {READ_GAP_MINUTES}m, "
+            "slowest counting the time since the last read",
         ),
         colour(
             DIM,
             f"  {'':<{TAB_WIDTH}} {'pool':<{POOL_WIDTH}} {'queued':>6} {'running':>7} {'done':>6} {'failed':>6}"
             f" {'rows':>6} {'blank':>6}"
-            f"   {'last read':<9} {'read':<6} {'slowest':<7}",
+            f"   {'last read':<9} {'read':<6} {'typical':<7} {'slowest':<7}",
         ),
     ]
     rows = conn.execute(
         f"""
         SELECT s.id, s.spreadsheet_name, s.worksheet, s.enabled, s.paused_until > now() AS paused, s.paused_until, o.pool,
             s.url_rows, s.blank_rows, s.read_error, extract(epoch FROM now() - s.last_read_at)::int AS read_seconds_ago,
-            (SELECT max(g.gap)::int FROM (
-                SELECT r.read_at, extract(epoch FROM r.read_at - lag(r.read_at) OVER (ORDER BY r.read_at)) AS gap
-                FROM sheet_reads r WHERE r.sheet_id = s.id
-            ) g WHERE g.read_at > now() - make_interval(mins => %(gap_minutes)s)) AS slowest_gap,
+            gaps.typical_gap, gaps.slowest_gap,
             count(j.id) FILTER (WHERE j.status = 'queued') AS queued,
             count(j.id) FILTER (WHERE j.status = 'running') AS running,
             count(j.id) FILTER (WHERE j.status = 'done' AND j.finished_at > now() - interval '1 day') AS done,
             count(j.id) FILTER (WHERE j.status = 'failed' AND j.finished_at > now() - interval '1 day') AS failed
         FROM sheets s LEFT JOIN jobs j ON j.sheet_id = s.id LEFT JOIN organisations o ON o.id = s.organisation_id
+        CROSS JOIN LATERAL (
+            -- percentile_disc, so typical is a real gap rather than one between two
+            SELECT percentile_disc(0.5) WITHIN GROUP (ORDER BY g.gap)::int AS typical_gap, max(g.gap)::int AS slowest_gap
+            FROM (
+                SELECT r.read_at, extract(epoch FROM r.read_at - lag(r.read_at) OVER (ORDER BY r.read_at)) AS gap
+                FROM sheet_reads r WHERE r.sheet_id = s.id
+            ) g WHERE g.read_at > now() - make_interval(mins => %(gap_minutes)s)
+        ) gaps
         WHERE {IN_POOL}
-        GROUP BY s.id, o.pool ORDER BY s.enabled DESC, o.pool, s.id
+        GROUP BY s.id, o.pool, gaps.typical_gap, gaps.slowest_gap ORDER BY s.enabled DESC, o.pool, s.id
         """,
         {"pool": pool, "gap_minutes": READ_GAP_MINUTES},
     ).fetchall()
@@ -304,13 +310,14 @@ def sheets(conn, pool: str = None) -> list[str]:
         # as sync's is_due: an active tab is read every pass, a quiet one every QUIET_TAB_SECONDS
         how_often = ("active" if row["id"] in active else "quiet") if row["enabled"] else ""
         # counting the time since the last read, so a tab sync has stopped reading shows it
-        slowest = ""
+        typical = slowest = ""
         if row["enabled"] and seconds is not None:
+            typical = "" if row["typical_gap"] is None else ago(row["typical_gap"])
             slowest = ago(max(row["slowest_gap"] or 0, seconds))
         lines.append(
             f"  {name:<{TAB_WIDTH}} {pool} {row['queued']:>6} {row['running']:>7} {done} {failed}"
             f" {url_rows:>6} {blank_rows:>6}"
-            f"   {read} {how_often:<6} {slowest:<7} {state}"
+            f"   {read} {how_often:<6} {typical:<7} {slowest:<7} {state}"
         )
         # only an enabled tab is read, so an old error on one that's off is left dim
         if row["read_error"]:

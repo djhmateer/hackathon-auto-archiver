@@ -15,6 +15,7 @@ import json
 import os
 import time
 from dataclasses import dataclass
+from urllib.parse import urlparse
 
 import gspread
 from gspread import utils as gspread_utils
@@ -31,6 +32,8 @@ READ_ONLY_SCOPES = [
     "https://www.googleapis.com/auth/drive.readonly",
 ]
 SHEETS_TIMEOUT_SECONDS = 60
+# a Google API call (Sheets, or Drive to find a spreadsheet by name) that takes longer, or fails, is logged with how long it took (see TimedHTTPClient)
+SLOW_REQUEST_SECONDS = 10
 # all sync and the writer need from a spreadsheet's metadata (see SlimSpreadsheet)
 METADATA_PARAMS = {"includeGridData": "false", "fields": "properties,sheets.properties"}
 SYNC_INTERVAL_SECONDS = 60
@@ -171,6 +174,28 @@ def load_settings(config_path: str) -> dict:
     }
 
 
+class TimedHTTPClient(gspread.http_client.HTTPClient):
+    """
+    gspread's, but logs each Google API call that takes over SLOW_REQUEST_SECONDS or fails, with how long it took.
+    DM 24th Nov 26 - a call that times out holds up the whole sync loop for SHEETS_TIMEOUT_SECONDS. This shows how long
+    the calls that succeed take, to see whether a shorter timeout would cut them off
+    """
+
+    def request(self, method, endpoint, *args, **kwargs):
+        started = time.monotonic()
+        # the path, eg /v4/spreadsheets/<id>/values:batchGet, without the host
+        call = f"{method.upper()} {urlparse(endpoint).path}"
+        try:
+            response = super().request(method, endpoint, *args, **kwargs)
+        except Exception as e:
+            logger.info(f"Google API {call} failed after {time.monotonic() - started:.1f}s: {type(e).__name__}")
+            raise
+        took = time.monotonic() - started
+        if took >= SLOW_REQUEST_SECONDS:
+            logger.info(f"Google API {call} took {took:.1f}s, {len(response.content) // 1024} KB")
+        return response
+
+
 class SlimSpreadsheet(gspread.Spreadsheet):
     """
     gspread's, but its metadata calls that ask for no particular fields (on opening, worksheets(), worksheet() etc.)
@@ -186,7 +211,7 @@ class SlimSpreadsheet(gspread.Spreadsheet):
 def open_spreadsheet(
     settings: dict, spreadsheet_id: str = None, scopes: list[str] = READ_ONLY_SCOPES
 ) -> gspread.Spreadsheet:
-    client = gspread.service_account(filename=settings["service_account"], scopes=scopes)
+    client = gspread.service_account(filename=settings["service_account"], scopes=scopes, http_client=TimedHTTPClient)
     client.set_timeout(SHEETS_TIMEOUT_SECONDS)
     if spreadsheet_id or settings["sheet_id"]:
         # as client.open_by_key() does, but with the smaller metadata
