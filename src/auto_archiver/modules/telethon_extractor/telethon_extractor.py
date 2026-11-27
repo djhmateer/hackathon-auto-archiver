@@ -14,6 +14,7 @@ from telethon.errors.rpcerrorlist import (
     FloodWaitError,
     InviteRequestSentError,
     InviteHashExpiredError,
+    AuthBytesInvalidError,
 )
 
 from tqdm import tqdm
@@ -189,7 +190,7 @@ class TelethonExtractor(Extractor):
 
                     # download the story media
                     filename_dest = os.path.join(self.tmp_dir, f"{chat}_{post_id}", str(story.id))
-                    if filename := self.client.download_media(story.media, filename_dest):
+                    if filename := self._download_media(story.media, filename_dest):
                         result.add_media(Media(filename))
                 except Exception as e:
                     logger.error(f"Error fetching story {post_id} from {chat}: {e}")
@@ -247,7 +248,7 @@ class TelethonExtractor(Extractor):
                                 result.add_media(Media(filename=filename), id=f"{group_id}_{i}")
 
                     filename_dest = os.path.join(self.tmp_dir, f"{chat}_{group_id}", str(mp.id))
-                    filename = self.client.download_media(mp.media, filename_dest)
+                    filename = self._download_media(mp.media, filename_dest)
                     if not filename:
                         logger.debug(f"Empty media found, skipping {str(mp)=}")
                         continue
@@ -257,6 +258,19 @@ class TelethonExtractor(Extractor):
                 if post.message != title:
                     result.set_content(post.message)
         return result.success("telethon")
+
+    def _download_media(self, media, filename_dest: str):
+        """
+        DM 27th Nov 26 - media stored in another Telegram data centre is fetched over a second connection, and
+        authorising that connection sometimes fails with AuthBytesInvalidError. The same row worked when re-run,
+        so try once more before giving up.
+        """
+        try:
+            return self.client.download_media(media, filename_dest)
+        except AuthBytesInvalidError as e:
+            logger.warning(f"{self.name} media download failed ({e}), retrying once")
+            time.sleep(2)
+            return self.client.download_media(media, filename_dest)
 
     def _ensure_private_channel_cached(self, chat: int) -> None:
         """

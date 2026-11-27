@@ -37,7 +37,9 @@ SLOW_REQUEST_SECONDS = 10
 # all sync and the writer need from a spreadsheet's metadata (see SlimSpreadsheet)
 METADATA_PARAMS = {"includeGridData": "false", "fields": "properties,sheets.properties"}
 SYNC_INTERVAL_SECONDS = 60
-SLOW_SPREADSHEET_SECONDS = 5  # a spreadsheet whose sync takes longer is logged with where the time went
+# a spreadsheet whose sync takes longer is logged with where the time went
+# DM 27th Nov 26 - 0 for a day, to see where every spreadsheet's time goes before cutting the calls. Then back to 5
+SLOW_SPREADSHEET_SECONDS = 0
 # DM 20th Nov 26 - a pass over every tab took ~50s, so new rows waited up to a minute. Now a tab with a job created in
 # the last ACTIVE_DAYS is read every pass (the coordinator's SYNC_SECONDS, 15s), and the rest every QUIET_TAB_SECONDS
 ACTIVE_DAYS = 7
@@ -380,8 +382,10 @@ def sync_cycle(conn, opener=open_spreadsheet, after_each=None) -> None:
             # before reading the sheet, for sync rule 1
             snapshot_at = db.now(conn)
             spreadsheet = opener(settings, spreadsheet_id)
-            tabs = allowed_tabs(spreadsheet, settings)
+            # opening is the token fetch and a metadata call, listing the tabs another metadata call
             opened = time.monotonic()
+            tabs = allowed_tabs(spreadsheet, settings)
+            listed = time.monotonic()
             for tab in tabs:
                 # new tabs, and renames of tabs and the spreadsheet
                 db.save_tab(conn, spreadsheet_id, tab.id, tab.title, config_path, spreadsheet_name=spreadsheet.title)
@@ -431,8 +435,8 @@ def sync_cycle(conn, opener=open_spreadsheet, after_each=None) -> None:
             took = time.monotonic() - started
             if took >= SLOW_SPREADSHEET_SECONDS:
                 logger.info(
-                    f"Sync of sheet '{spreadsheet.title}' took {took:.1f}s: opening and listing its tabs "
-                    f"{opened - started:.1f}s, reading {len(tabs)} tab(s) {read - opened:.1f}s, "
+                    f"Sync of sheet '{spreadsheet.title}' took {took:.1f}s: opening {opened - started:.1f}s, "
+                    f"listing its tabs {listed - opened:.1f}s, reading {len(tabs)} tab(s) {read - listed:.1f}s, "
                     f"working out the jobs {time.monotonic() - read:.1f}s"
                 )
         except Exception as e:

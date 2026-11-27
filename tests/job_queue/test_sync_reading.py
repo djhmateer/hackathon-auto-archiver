@@ -324,6 +324,7 @@ def test_a_tab_missing_its_status_column_has_an_error_until_its_fixed(conn, conf
 def test_a_slow_spreadsheet_is_logged_with_where_the_time_went(conn, config, caplog, monkeypatch):
     sheet = FakeSpreadsheet([tab_of(row("https://example.com/1"))])
     setup_sheet(conn, sheet)
+    monkeypatch.setattr(sync, "SLOW_SPREADSHEET_SECONDS", 5)
     run(conn, sheet)
     assert "Sync of sheet" not in caplog.text  # quick, so not logged
 

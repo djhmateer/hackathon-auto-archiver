@@ -210,3 +210,43 @@ def test_private_channel_when_dialogs_failed_to_load_does_not_stop_the_row(telet
     assert telethon_with_mock_client.download(item) is False
     assert item.get_status_notes() == ["possible private channel issue - telegram account may not be a member"]
     assert item.get_context("stop_archiving") is None
+
+
+def _post_with_media(extractor, mocker, tmp_path):
+    extractor.tmp_dir = str(tmp_path)
+    post = mocker.MagicMock(
+        id=1, grouped_id=None, message="text", date=datetime(2026, 1, 1, tzinfo=timezone.utc), entities=[]
+    )
+    post.to_dict.return_value = {}
+    extractor.client.get_messages.return_value = post
+    mocker.patch.object(extractor, "_get_media_posts_in_group", return_value=[post])
+    mocker.patch("auto_archiver.modules.telethon_extractor.telethon_extractor.time.sleep")
+
+
+def test_media_download_retries_once_on_auth_bytes_invalid(telethon_with_mock_client, mocker, tmp_path):
+    from telethon.errors.rpcerrorlist import AuthBytesInvalidError
+
+    extractor = telethon_with_mock_client
+    extractor.name = "telethon_extractor"
+    _post_with_media(extractor, mocker, tmp_path)
+    media_file = tmp_path / "photo1.jpg"
+    media_file.write_bytes(b"x")
+    extractor.client.download_media.side_effect = [AuthBytesInvalidError(request=None), str(media_file)]
+
+    result = extractor.download(mocker_item("https://t.me/channel1/1"))
+
+    assert extractor.client.download_media.call_count == 2
+    assert [m.filename for m in result.media] == [str(media_file)]
+
+
+def test_media_download_raises_if_retry_also_fails(telethon_with_mock_client, mocker, tmp_path):
+    from telethon.errors.rpcerrorlist import AuthBytesInvalidError
+
+    extractor = telethon_with_mock_client
+    extractor.name = "telethon_extractor"
+    _post_with_media(extractor, mocker, tmp_path)
+    extractor.client.download_media.side_effect = AuthBytesInvalidError(request=None)
+
+    with pytest.raises(AuthBytesInvalidError):
+        extractor.download(mocker_item("https://t.me/channel1/1"))
+    assert extractor.client.download_media.call_count == 2
