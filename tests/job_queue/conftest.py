@@ -47,6 +47,8 @@ def fresh_sync_logs(monkeypatch):
 
     sync._last_logged.clear()
     sync._last_read.clear()
+    # open_spreadsheet keeps its clients, and tests patch gspread.service_account with their own
+    sync._clients.clear()
     monkeypatch.setattr(sync, "QUIET_TAB_SECONDS", 0)
 
 

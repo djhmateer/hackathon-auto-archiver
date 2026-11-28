@@ -6,7 +6,7 @@ import gspread
 import pytest
 from job_queue_fakes import FakeSpreadsheet, FakeTab, opener_for
 
-from auto_archiver.job_queue import db, sync
+from auto_archiver.job_queue import db, sync, writer
 
 HEADERS = ["Link", "Archive status", "Destination folder", "Text content"]
 CONFIG = "orchestration-example.yaml"
@@ -226,6 +226,18 @@ def test_one_broken_spreadsheet_does_not_stop_the_others(conn, config):
     assert conn.execute("SELECT count(*) AS n FROM heartbeats WHERE name = 'sync'").fetchone()["n"] == 1
 
 
+def test_spreadsheets_share_a_client_per_service_account_and_scopes(mocker):
+    # a new client was a token fetch on every open
+    connect = mocker.patch("auto_archiver.job_queue.sync.gspread.service_account")
+    settings = {"service_account": "account.json", "sheet_id": "spreadsheet1", "sheet": None}
+    sync.open_spreadsheet(settings)
+    sync.open_spreadsheet(settings, "spreadsheet2")
+    assert connect.call_count == 1
+    writer.open_for_writing(settings)
+    sync.open_spreadsheet({**settings, "service_account": "other.json"})
+    assert connect.call_count == 3, "the writer's scopes and another account each get their own"
+
+
 def test_google_connection_is_read_only(mocker):
     connect = mocker.patch("auto_archiver.job_queue.sync.gspread.service_account")
     sync.open_spreadsheet({"service_account": "account.json", "sheet_id": "spreadsheet1", "sheet": None})
@@ -250,9 +262,12 @@ def test_opening_a_spreadsheet_fetches_only_the_metadata_sync_needs(mocker):
     spreadsheet = sync.open_spreadsheet({"service_account": "account.json", "sheet_id": "spreadsheet1", "sheet": None})
     (tab,) = spreadsheet.worksheets()
 
-    assert http_client.params == [sync.METADATA_PARAMS, sync.METADATA_PARAMS], "on opening, and in worksheets()"
+    assert http_client.params == [sync.METADATA_PARAMS], "once: worksheets() straight after reuses the opening's"
     assert (spreadsheet.id, spreadsheet.title) == ("spreadsheet1", "Example Sheet")
     assert (tab.id, tab.title, tab.row_count) == (7, "Tab 1", 10)
+
+    spreadsheet.worksheets()
+    assert http_client.params == [sync.METADATA_PARAMS] * 2, "a later worksheets() fetches the tabs again"
 
     spreadsheet.fetch_sheet_metadata(params={"fields": "namedRanges"})  # eg gspread's list_named_ranges()
     assert http_client.params[-1] == {"fields": "namedRanges"}, "a call asking for particular fields still gets them"

@@ -496,7 +496,7 @@ Never edit a file that has already been applied: its checksum is recorded. The c
 | Setting | Value | Defined in |
 |---|---|---|
 | Coordinator cycle (writer, cleanup) | 5 s | `coordinator.py` `CYCLE_SECONDS` |
-| Sheet sync pass | 15 s | `coordinator.py` `SYNC_SECONDS` |
+| Sheet sync pass | every 15 s from the start of the last one; one that takes longer is followed by the next after the 5 s cycle sleep | `coordinator.py` `SYNC_SECONDS` |
 | Tabs read each pass | those with a job added in the last 7 days (active); the rest (quiet) every 5 min | `sync.py` `ACTIVE_DAYS`, `QUIET_TAB_SECONDS` |
 | Worker tick and heartbeat | 2 s | `worker_supervisor.py` `TICK_SECONDS` |
 | Worker reported as quiet after | 30 s without a heartbeat | `coordinator.py` `WORKER_QUIET_SECONDS` |

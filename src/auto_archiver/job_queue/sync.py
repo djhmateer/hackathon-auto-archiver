@@ -39,6 +39,7 @@ METADATA_PARAMS = {"includeGridData": "false", "fields": "properties,sheets.prop
 SYNC_INTERVAL_SECONDS = 60
 # a spreadsheet whose sync takes longer is logged with where the time went
 # DM 27th Nov 26 - 0 for a day, to see where every spreadsheet's time goes before cutting the calls. Then back to 5
+# DM 28th Nov 26 - kept at 0 a day more, to measure the calls cut (one client per account, no second metadata call)
 SLOW_SPREADSHEET_SECONDS = 0
 # DM 20th Nov 26 - a pass over every tab took ~50s, so new rows waited up to a minute. Now a tab with a job created in
 # the last ACTIVE_DAYS is read every pass (the coordinator's SYNC_SECONDS, 15s), and the rest every QUIET_TAB_SECONDS
@@ -204,17 +205,44 @@ class SlimSpreadsheet(gspread.Spreadsheet):
     fetch only the spreadsheet's and its tabs' properties: title, ids, row counts, which is all those use. The full
     metadata adds every tab's merges, conditional formats etc.
     DM 24th Nov 26 - that was 42 MB for one spreadsheet, taking ~4s, twice per sync of it and per write batch
+    DM 28th Nov 26 - it also keeps the metadata fetched on opening, for the worksheets() call that sync and the writer
+    make straight after. That was a second identical call, ~0.3s per spreadsheet per pass. Later calls fetch it again
     """
+
+    def __init__(self, http_client, properties):
+        # as gspread's (6.2), but keeping the metadata
+        self.client = http_client
+        self._properties = properties
+        self._opening_metadata = self.fetch_sheet_metadata()
+        self._properties.update(self._opening_metadata["properties"])
 
     def fetch_sheet_metadata(self, params=None):
         return super().fetch_sheet_metadata(params or METADATA_PARAMS)
+
+    def worksheets(self, exclude_hidden: bool = False) -> list[gspread.Worksheet]:
+        if self._opening_metadata is None:
+            return super().worksheets(exclude_hidden)
+        metadata, self._opening_metadata = self._opening_metadata, None
+        tabs = [gspread.Worksheet(self, tab["properties"], self.id, self.client) for tab in metadata["sheets"]]
+        return [tab for tab in tabs if not (exclude_hidden and tab.isSheetHidden)]
+
+
+# one client per service account file and scopes, so its token is fetched once an hour rather than per spreadsheet,
+# and its connections are reused. google-auth refreshes the token when it expires. A rotated key needs a restart.
+# DM 28th Nov 26 - a new one each time was a token fetch and new connections on every open (opening took ~0.7s)
+_clients = {}
 
 
 def open_spreadsheet(
     settings: dict, spreadsheet_id: str = None, scopes: list[str] = READ_ONLY_SCOPES
 ) -> gspread.Spreadsheet:
-    client = gspread.service_account(filename=settings["service_account"], scopes=scopes, http_client=TimedHTTPClient)
-    client.set_timeout(SHEETS_TIMEOUT_SECONDS)
+    key = (settings["service_account"], tuple(scopes))
+    if key not in _clients:
+        _clients[key] = gspread.service_account(
+            filename=settings["service_account"], scopes=scopes, http_client=TimedHTTPClient
+        )
+        _clients[key].set_timeout(SHEETS_TIMEOUT_SECONDS)
+    client = _clients[key]
     if spreadsheet_id or settings["sheet_id"]:
         # as client.open_by_key() does, but with the smaller metadata
         return SlimSpreadsheet(client.http_client, {"id": spreadsheet_id or settings["sheet_id"]})

@@ -194,9 +194,12 @@ def main() -> None:
             # a new connection each time, so a Postgres restart only loses one cycle
             with db.connect() as conn:
                 sync_due = time.monotonic() - last_sync >= SYNC_SECONDS
-                cycle(conn, sync_due, watcher)
+                # DM 28th Nov 26 - timed from the start of the pass, not the end. From the end, the gap between an
+                # active tab's reads was the pass (~19s) plus SYNC_SECONDS, ~35s. Now a pass over 10s is followed by
+                # the next straight after the CYCLE_SECONDS sleep
                 if sync_due:
                     last_sync = time.monotonic()
+                cycle(conn, sync_due, watcher)
         except Exception as e:
             logger.error(f"Coordinator cycle failed: {e}")
         time.sleep(CYCLE_SECONDS)
