@@ -168,18 +168,18 @@ files = [
 
 [[package]]
 name = "boto3"
-version = "1.44.12"
+version = "1.44.13"
 description = "The AWS SDK for Python (Boto3)"
 optional = false
 python-versions = ">=3.10"
 groups = ["main"]
 files = [
-    {file = "boto3-1.44.12-py3-none-any.whl", hash = "sha256:9f1cf241303edb523af912ebdc001e0563301d9ba8eef076d25fe9a8bfb6efaf"},
-    {file = "boto3-1.44.12.tar.gz", hash = "sha256:7459cd7a476eef9a5a8044f5cd6b2dfa47cef0fcb74aefa951e154c5102b1199"},
+    {file = "boto3-1.44.13-py3-none-any.whl", hash = "sha256:c3080e768d338da01228bdb937708a856a1f01d1a31d2ceaf5286a8f647e0624"},
+    {file = "boto3-1.44.13.tar.gz", hash = "sha256:879de3341ade5abc796bb5835130882f97a041f24f2bc4ee9bc1febd57cb2552"},
 ]
 
 [package.dependencies]
-botocore = ">=1.44.12,<1.45.0"
+botocore = ">=1.44.13,<1.45.0"
 jmespath = ">=0.7.1,<2.0.0"
 s3transfer = ">=0.19.0,<0.20.0"
 
@@ -188,14 +188,14 @@ crt = ["botocore[crt] (>=1.21.0,<2.0a0)"]
 
 [[package]]
 name = "botocore"
-version = "1.44.12"
+version = "1.44.13"
 description = "Low-level, data-driven core of boto 3."
 optional = false
 python-versions = ">=3.10"
 groups = ["main"]
 files = [
-    {file = "botocore-1.44.12-py3-none-any.whl", hash = "sha256:d5df4cf868f2c4050999a0e6bc94e0a039017e719f4e27b2a8e87053856787b9"},
-    {file = "botocore-1.44.12.tar.gz", hash = "sha256:5806bb66bf167fa3172f4ddf78b088db9b22653702537b19969d02d2c3301ee5"},
+    {file = "botocore-1.44.13-py3-none-any.whl", hash = "sha256:9d7944b8c7f66c775756ae2ec26a4b903fa5c6f0aad1b58bf0d89e0a85913425"},
+    {file = "botocore-1.44.13.tar.gz", hash = "sha256:9e5684e0cccc012ac2eb6db0bbf89617af3f369251aa89b02193789007c043d3"},
 ]
 
 [package.dependencies]
@@ -1090,15 +1090,15 @@ files = [
 
 [[package]]
 name = "filelock"
-version = "4.3.1"
+version = "4.3.2"
 description = "A platform independent file lock."
 optional = false
 python-versions = ">=3.11"
 groups = ["main", "dev"]
 markers = "python_version >= \"3.11\""
 files = [
-    {file = "filelock-4.3.1-py3-none-any.whl", hash = "sha256:79e43df8e9fe509cd83a3899a7c186c8077cbbe4d200a1ed3705c2f3bb6bc487"},
-    {file = "filelock-4.3.1.tar.gz", hash = "sha256:4c5ee627c401f1863ac6a0de9a14a28d3bb5f8c730b45e2fd6e5dbc79cf34b9e"},
+    {file = "filelock-4.3.2-py3-none-any.whl", hash = "sha256:02a8801bc6b2a80921bf3d7895c63084d53bae2a3c86783adce5ae2b89a1825b"},
+    {file = "filelock-4.3.2.tar.gz", hash = "sha256:4f0a21c70447782453c06bb20a9863ee385ead1abaef22049af79289496851b3"},
 ]
 
 [[package]]
@@ -2031,22 +2031,32 @@ tabcompleter = ">=1.4.1"
 
 [[package]]
 name = "pdqhash"
-version = "0.2.8"
-description = "\"Python bindings for Facebook's PDQ hash\""
+version = "0.2.9"
+description = "Python bindings for Facebook's PDQ hash"
 optional = false
-python-versions = "*"
+python-versions = ">=3.9"
 groups = ["main"]
 files = [
-    {file = "pdqhash-0.2.8-cp310-cp310-macosx_10_9_universal2.whl", hash = "sha256:01e615089a7a22067627e97c383e371d6db363aca9587f4080a6e43cb6228fff"},
-    {file = "pdqhash-0.2.8-cp310-cp310-win_amd64.whl", hash = "sha256:fa49dfeb82b1549318bd3743ae112e4a1feb3dfeb8a6bb859d7f0cbdc5b7c0be"},
-    {file = "pdqhash-0.2.8-cp311-cp311-macosx_10_9_universal2.whl", hash = "sha256:5459e57ae2c432429bc2ee1077cd2973a0c24d491f54777d5b4bf249bef35f48"},
-    {file = "pdqhash-0.2.8-cp311-cp311-win_amd64.whl", hash = "sha256:a7b3a626413bad245e3cdd815a4d644a68736982c4b9eb130b52d74dcb48f8e5"},
-    {file = "pdqhash-0.2.8-cp312-cp312-macosx_10_13_universal2.whl", hash = "sha256:13f106595b566677b0a125d96c6910fd1f1bbf2e86aae3a36ca8e0ed67ded02c"},
-    {file = "pdqhash-0.2.8-cp312-cp312-win_amd64.whl", hash = "sha256:fe082d83432583eaf7938fade50ec14e2ecc597b648dbca3419703b7a36f07f0"},
-    {file = "pdqhash-0.2.8-cp313-cp313-macosx_10_13_universal2.whl", hash = "sha256:e7f50d8382a8850917a77232e00bc649b63db8e018423e6175842a226b01fad8"},
-    {file = "pdqhash-0.2.8-cp313-cp313-win_amd64.whl", hash = "sha256:b3f892a767708eb63a7b3498e23582a34890a0f2a31833d28fd16c355e1f0d4d"},
-    {file = "pdqhash-0.2.8.tar.gz", hash = "sha256:eb9a9de36745937ce3e481a02ce933fe907c84e0b1748c9dfea52c12ca5c1e35"},
+    {file = "pdqhash-0.2.9-cp310-cp310-macosx_10_9_universal2.whl", hash = "sha256:8e4142be7b40a1215400137e8d29fd6c973024cd050f9c0de3c398c918a142ff"},
+    {file = "pdqhash-0.2.9-cp310-cp310-manylinux_2_24_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:5125e9ce732cbb4bdaafa7c67c1380a49c02587d85a37d7e36373072bc167593"},
+    {file = "pdqhash-0.2.9-cp310-cp310-win_amd64.whl", hash = "sha256:a1ec3c31bff714e69e964d41c6cd6d708a183f6c30a05836a22a7030495b2775"},
+    {file = "pdqhash-0.2.9-cp311-cp311-macosx_10_9_universal2.whl", hash = "sha256:d34f9303ce068e99598bf62e726360ee1210ce7282f9c633d4e6f5f9df2f8e78"},
+    {file = "pdqhash-0.2.9-cp311-cp311-manylinux_2_24_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:15e6fa42d57843507cf287cdc5ef416a66d07d61eeae8a466847621e83118e18"},
+    {file = "pdqhash-0.2.9-cp311-cp311-win_amd64.whl", hash = "sha256:b4fb172e75ada6eb3e18aa6a824a300563d2f1c26ead6ca60e0d6607fe049003"},
+    {file = "pdqhash-0.2.9-cp312-cp312-macosx_10_13_universal2.whl", hash = "sha256:cc075bbcfe28af1d8bfec5dfd1f8f7aaf4c04286a8d8adf0a49a8fd38f827bfe"},
+    {file = "pdqhash-0.2.9-cp312-cp312-manylinux_2_24_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:4c368a67a6e0a2c23807af3b0e8983b1236227d864762e0e663a0c58c599b42c"},
+    {file = "pdqhash-0.2.9-cp312-cp312-win_amd64.whl", hash = "sha256:3289d93e765d74baa5486a3f93dd83cfbeb820eedc429a3f564788f69f314653"},
+    {file = "pdqhash-0.2.9-cp313-cp313-macosx_10_13_universal2.whl", hash = "sha256:81559fcd5790bdf97dc34d4a676f597d9cd224979e749cc9fb70f83a99e3aa74"},
+    {file = "pdqhash-0.2.9-cp313-cp313-manylinux_2_24_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:888da5cb0725fa0e2f4d1a21212be314ac7f0c1bc11056bd06e37ea2e574f66f"},
+    {file = "pdqhash-0.2.9-cp313-cp313-win_amd64.whl", hash = "sha256:81724e01419e1d5527d0bc1c4634c6de00fcdaaa3bb4f8aae71fbcd99f7d681c"},
+    {file = "pdqhash-0.2.9-cp314-cp314-macosx_10_15_universal2.whl", hash = "sha256:577628afbae0e9dd06e21091c4b2df367405d24a59044b7a369cabab11226676"},
+    {file = "pdqhash-0.2.9-cp314-cp314-manylinux_2_24_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:275bf72085919063716eb864beeeb58166ec0cee63e91d77eaa8b0fdfe60a2c9"},
+    {file = "pdqhash-0.2.9-cp314-cp314-win_amd64.whl", hash = "sha256:5e583ec59b2cc230f11d751066bf1effe6612586f1927bc8ede7c8e00e2623c8"},
+    {file = "pdqhash-0.2.9.tar.gz", hash = "sha256:03c34829a45911b0d084db76d1a63fe55cfb633e7cefb8ec6c4feda304850560"},
 ]
+
+[package.dependencies]
+numpy = ">=2.0"
 
 [[package]]
 name = "pillow"
@@ -2283,15 +2293,15 @@ files = [
 
 [[package]]
 name = "platformdirs"
-version = "4.14.8"
+version = "4.14.9"
 description = "A small Python package for determining appropriate platform-specific dirs, e.g. a `user data dir`."
 optional = false
 python-versions = ">=3.11"
 groups = ["main", "dev"]
 markers = "python_version >= \"3.11\""
 files = [
-    {file = "platformdirs-4.14.8-py3-none-any.whl", hash = "sha256:1e34af590de4d978631b751eb2202f2fee4497537a17c1720b12fcf57b331392"},
-    {file = "platformdirs-4.14.8.tar.gz", hash = "sha256:96893d686e84e9e6f358a9ea41a8de544df66dbf2ba6cda250e7dc73acf85b9b"},
+    {file = "platformdirs-4.14.9-py3-none-any.whl", hash = "sha256:d0d3a23e7ff282cfa94b77f5a22b81030dcb68ba0430f90c74f4bd8d090782ea"},
+    {file = "platformdirs-4.14.9.tar.gz", hash = "sha256:c6b188e03ffd4dfe1bf8c4bcb47cd94711af244a9852dbff60297bd753684d5d"},
 ]
 
 [[package]]
@@ -3120,14 +3130,14 @@ six = ">=1.5"
 
 [[package]]
 name = "python-discovery"
-version = "1.9.7"
+version = "1.9.8"
 description = "Python interpreter discovery"
 optional = false
 python-versions = ">=3.9"
 groups = ["dev"]
 files = [
-    {file = "python_discovery-1.9.7-py3-none-any.whl", hash = "sha256:3add4a4dfc794f8e4a8c0fa0d9d6563172196d68709071a627e89fc36af39177"},
-    {file = "python_discovery-1.9.7.tar.gz", hash = "sha256:cea89e8a8b86e19731c67f8393f34eb1a2f96c9f97f3e406929a99c646a2358d"},
+    {file = "python_discovery-1.9.8-py3-none-any.whl", hash = "sha256:4e0c3349272923b6f58db8c5dad111b09dec9d3e2c97f9b79023f8b2e9acf7ab"},
+    {file = "python_discovery-1.9.8.tar.gz", hash = "sha256:5d66dd004e6972687438a799fa0895b7a900c1b7324a525196f1826bf7cebb03"},
 ]
 
 [package.dependencies]
@@ -4753,15 +4763,15 @@ typing-extensions = {version = ">=4.13.2", markers = "python_version < \"3.11\""
 
 [[package]]
 name = "virtualenv"
-version = "21.15.13"
+version = "21.15.14"
 description = "Virtual Python Environment builder"
 optional = false
 python-versions = ">=3.9"
 groups = ["dev"]
 markers = "python_version >= \"3.11\""
 files = [
-    {file = "virtualenv-21.15.13-py3-none-any.whl", hash = "sha256:2744de3b2ba59027ed7eb87c773d4907f56287f4db23b459e8172dcdb41c208d"},
-    {file = "virtualenv-21.15.13.tar.gz", hash = "sha256:f3ad23551343034e613f9c4d8279f282958a19729f5fc2bcb758afcf95fe3a01"},
+    {file = "virtualenv-21.15.14-py3-none-any.whl", hash = "sha256:816503d7826a2269abc03f7f0dd48ffd3b63db1958a7a3cbeea5a70dd7fe0ff1"},
+    {file = "virtualenv-21.15.14.tar.gz", hash = "sha256:6c6e7aaf88064767c75c32a9df92eaa425cee5db4cc21caf031a78d89375d57f"},
 ]
 
 [package.dependencies]
